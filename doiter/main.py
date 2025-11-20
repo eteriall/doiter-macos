@@ -21,6 +21,7 @@ class DoiterApp:
         """Initialize the application."""
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        self._cleanup_done = False
 
         # Initialize components
         self.task_manager = TaskManager()
@@ -50,10 +51,17 @@ class DoiterApp:
         """Handle shutdown signals."""
         print(f"\nReceived signal {signum}, shutting down...")
         self.cleanup()
-        sys.exit(0)
+        app = NSApp()
+        if app:
+            app.terminate_(None)
+        else:
+            self.app.terminate_(None)
 
     def cleanup(self):
         """Cleanup resources."""
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
         self.hotkey_listener.stop()
         self.status_bar.remove()
         self.task_manager.close()

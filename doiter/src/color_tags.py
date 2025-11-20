@@ -55,3 +55,4 @@ COLOR_TAGS = [
 COLOR_TAG_KEY_ORDER = [tag["key"] for tag in COLOR_TAGS]
 COLOR_TAG_EMOJI_MAP = {tag["key"]: tag["emoji"] for tag in COLOR_TAGS}
 COLOR_TAG_KEYCODE_MAP = {tag["key_code"]: tag["key"] for tag in COLOR_TAGS}
+COLOR_TAG_NAME_MAP = {tag["key"]: tag["name"] for tag in COLOR_TAGS}

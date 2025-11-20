@@ -12,15 +12,33 @@ from AppKit import (
     NSWindowCollectionBehaviorTransient, NSWindowCollectionBehaviorIgnoresCycle,
     NSEvent, NSEventMaskKeyDown, NSPanel, NSViewWidthSizable, NSViewHeightSizable,
     NSWorkspace, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSUnderlineStyleAttributeName
+    NSUnderlineStyleAttributeName, NSPasteboard, NSPasteboardTypeString,
+    NSMutableParagraphStyle
 )
 from typing import List, Dict, Optional, Callable
 
-from .color_tags import COLOR_TAG_EMOJI_MAP, COLOR_TAG_KEYCODE_MAP
+from .color_tags import COLOR_TAG_EMOJI_MAP, COLOR_TAG_KEYCODE_MAP, COLOR_TAG_NAME_MAP
 
 
 class KeyableWindow(NSWindow):
     """Custom NSWindow that can become key and accept input."""
+
+    def init(self):
+        self = objc.super(KeyableWindow, self).init()
+        if self is None:
+            return None
+        self.resize_delegate = None
+        return self
+
+    def setResizeDelegate_(self, delegate):
+        """Set the resize delegate."""
+        self.resize_delegate = delegate
+
+    def setFrame_display_animate_(self, frame, display, animate):
+        """Override to notify delegate on resize."""
+        objc.super(KeyableWindow, self).setFrame_display_animate_(frame, display, animate)
+        if self.resize_delegate and hasattr(self.resize_delegate, 'windowDidResize_'):
+            self.resize_delegate.windowDidResize_(self)
 
     def canBecomeKeyWindow(self) -> bool:
         """Allow window to become key."""
@@ -93,6 +111,120 @@ class ClickableLabel(NSTextField):
                 NSWorkspace.sharedWorkspace().openURL_(nsurl)
         else:
             objc.super(ClickableLabel, self).mouseDown_(event)
+
+
+class ResizeHandle(NSView):
+    """Custom view for handling window resizing from bottom-right corner."""
+
+    def init(self):
+        self = objc.super(ResizeHandle, self).init()
+        if self is None:
+            return None
+        self.window_ref = None
+        self.is_dragging = False
+        self.drag_start_point = None
+        self.drag_start_frame = None
+        self.original_movable_state = None
+        self.original_window_movable = None
+        return self
+
+    def setWindowRef_(self, window):
+        self.window_ref = window
+
+    def mouseDownCanMoveWindow(self):
+        """Prevent the window from moving when the resize handle is grabbed."""
+        return False
+
+    def drawRect_(self, rect):
+        """Draw the resize indicator lines."""
+        objc.super(ResizeHandle, self).drawRect_(rect)
+
+        # Draw three diagonal lines in the corner
+        NSColor.tertiaryLabelColor().set()
+        path = Cocoa.NSBezierPath.bezierPath()
+        path.setLineWidth_(1.0)
+
+        bounds = self.bounds()
+        width = bounds.size.width
+        height = bounds.size.height
+
+        # Three parallel diagonal lines
+        for i in range(3):
+            offset = i * 4
+            path.moveToPoint_(NSMakePoint(width - 3 - offset, 3))
+            path.lineToPoint_(NSMakePoint(width - 3, 3 + offset))
+
+        path.stroke()
+
+    def mouseDown_(self, event):
+        if not self.window_ref:
+            return
+        self.is_dragging = True
+        self.drag_start_point = NSEvent.mouseLocation()
+        self.drag_start_frame = self.window_ref.frame()
+
+        # Disable window dragging while resizing
+        self.original_movable_state = self.window_ref.isMovableByWindowBackground()
+        if hasattr(self.window_ref, "isMovable") and hasattr(self.window_ref, "setMovable_"):
+            self.original_window_movable = self.window_ref.isMovable()
+            self.window_ref.setMovable_(False)
+        self.window_ref.setMovableByWindowBackground_(False)
+
+    def mouseDragged_(self, event):
+        if not self.is_dragging or not self.window_ref:
+            return
+
+        current_point = NSEvent.mouseLocation()
+        dx = current_point.x - self.drag_start_point.x
+        dy = current_point.y - self.drag_start_point.y
+
+        # Calculate new width (grows to the right)
+        new_width = max(400, min(1000, self.drag_start_frame.size.width + dx))
+
+        # Calculate new height (grows downward)
+        # Since macOS origin is bottom-left, dragging down means moving mouse down (decreasing y)
+        # So we need to subtract dy to increase height when dragging down
+        new_height = max(300, min(800, self.drag_start_frame.size.height - dy))
+
+        # Keep top-left corner fixed by adjusting origin.y
+        # When height increases (dragging down), origin.y must decrease
+        height_change = new_height - self.drag_start_frame.size.height
+        new_y = self.drag_start_frame.origin.y - height_change
+
+        new_frame = NSMakeRect(
+            self.drag_start_frame.origin.x,  # Keep X fixed
+            new_y,                            # Adjust Y to keep top fixed
+            new_width,
+            new_height
+        )
+
+        self.window_ref.setFrame_display_animate_(new_frame, True, False)
+
+    def mouseUp_(self, event):
+        self.is_dragging = False
+        self.drag_start_point = None
+        self.drag_start_frame = None
+
+        # Restore window dragging state
+        if self.window_ref and self.original_movable_state is not None:
+            self.window_ref.setMovableByWindowBackground_(self.original_movable_state)
+            self.original_movable_state = None
+        if (
+            self.window_ref
+            and self.original_window_movable is not None
+            and hasattr(self.window_ref, "setMovable_")
+        ):
+            self.window_ref.setMovable_(self.original_window_movable)
+            self.original_window_movable = None
+
+    def resetCursorRects(self):
+        self.addCursorRect_cursor_(
+            self.bounds(),
+            Cocoa.NSCursor.alloc().initWithImage_hotSpot_(
+                Cocoa.NSImage.imageNamed_("NSResizeNWSE"),
+                NSMakePoint(8, 8)
+            ) if hasattr(Cocoa.NSImage, 'imageNamed_') else Cocoa.NSCursor.arrowCursor()
+        )
 
 
 class TaskTableDelegate(NSObject):
@@ -201,6 +333,7 @@ class OverlayWindow:
         self.footer_label = None
         self.toast_timer_handler = ToastTimerHandler.alloc().init()
         self.toast_timer_handler.setOverlay_(self)
+        self.sort_mode = "position"  # "position" or "tags"
 
         # Window dimensions
         self.width = 500
@@ -210,6 +343,9 @@ class OverlayWindow:
         self._create_ui()
         self._setup_observers()
         self._setup_event_monitor()
+
+        # Set self as resize delegate
+        self.window.setResizeDelegate_(self)
 
     def _create_window(self):
         """Create the main window with blur effect."""
@@ -312,11 +448,11 @@ class OverlayWindow:
 
         # Add separator line below input
         separator_y = input_top - 4
-        separator = NSView.alloc().initWithFrame_(
+        self.separator = NSView.alloc().initWithFrame_(
             NSMakeRect(20, separator_y, self.width - 40, 1)
         )
-        separator.setWantsLayer_(True)
-        separator.layer().setBackgroundColor_(
+        self.separator.setWantsLayer_(True)
+        self.separator.layer().setBackgroundColor_(
             NSColor.separatorColor().CGColor()
         )
 
@@ -342,7 +478,7 @@ class OverlayWindow:
         footer_margin = 24
         footer_y = 20
         self.footer_label = ClickableLabel.alloc().initWithFrame_(
-            NSMakeRect(20, footer_y, self.width - 40, footer_height)
+            NSMakeRect(0, footer_y, self.width, footer_height)
         )
         self.footer_label.setEditable_(False)
         self.footer_label.setBordered_(False)
@@ -356,16 +492,16 @@ class OverlayWindow:
         self.footer_label.setURL_("https://rasskazchikov.de")
 
         # Create scroll view for tasks - above footer
-        scroll_view = NSScrollView.alloc().initWithFrame_(
+        self.scroll_view = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(20, footer_y + footer_height + 8, self.width - 40, scroll_height)
         )
-        scroll_view.setHasVerticalScroller_(True)
-        scroll_view.setAutohidesScrollers_(True)
-        scroll_view.setBorderType_(0)  # No border
-        scroll_view.setDrawsBackground_(False)
+        self.scroll_view.setHasVerticalScroller_(True)
+        self.scroll_view.setAutohidesScrollers_(True)
+        self.scroll_view.setBorderType_(0)  # No border
+        self.scroll_view.setDrawsBackground_(False)
 
         # Create table view
-        self.table_view = NSTableView.alloc().initWithFrame_(scroll_view.bounds())
+        self.table_view = NSTableView.alloc().initWithFrame_(self.scroll_view.bounds())
         self.table_view.setBackgroundColor_(NSColor.clearColor())
         self.table_view.setGridStyleMask_(0)  # No grid
         self.table_view.setRowHeight_(52)  # Allow larger font for rows
@@ -388,16 +524,25 @@ class OverlayWindow:
         self.table_view.setDelegate_(self.delegate)
         self.table_view.setDataSource_(self.delegate)
 
-        scroll_view.setDocumentView_(self.table_view)
+        self.scroll_view.setDocumentView_(self.table_view)
+
+        # Add resize handle in bottom-right corner
+        resize_handle_size = 20
+        self.resize_handle = ResizeHandle.alloc().initWithFrame_(
+            NSMakeRect(self.width - resize_handle_size, 0, resize_handle_size, resize_handle_size)
+        )
+        self.resize_handle.setWindowRef_(self.window)
+        self.resize_handle.setWantsLayer_(True)
 
         # Add views to container
         self.container.addSubview_(self.input_field)
-        self.container.addSubview_(separator)
+        self.container.addSubview_(self.separator)
         if self.status_label:
             self.container.addSubview_(self.status_label)
-        self.container.addSubview_(scroll_view)
+        self.container.addSubview_(self.scroll_view)
         if self.footer_label:
             self.container.addSubview_(self.footer_label)
+        self.container.addSubview_(self.resize_handle)
         self._create_toast_view()
         self._update_status_hint()
         self._update_footer_text()
@@ -531,7 +676,7 @@ class OverlayWindow:
     def _refresh_tasks(self):
         """Refresh the task list."""
         filter_text = self.input_field.stringValue()
-        self.current_tasks = self.task_manager.get_tasks(filter_text)
+        self.current_tasks = self.task_manager.get_tasks(filter_text, self.sort_mode)
         self.delegate.setTasks_(self.current_tasks)
         self.delegate.setEditingTaskId_(self.editing_task_id)
         preview = self.editing_preview_text if self.is_editing else ""
@@ -598,16 +743,75 @@ class OverlayWindow:
         if not self.footer_label:
             return
 
+        paragraph_style = NSMutableParagraphStyle.alloc().init()
+        paragraph_style.setAlignment_(NSCenterTextAlignment)
+
         attributes = {
             NSFontAttributeName: NSFont.systemFontOfSize_(12),
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
-            NSUnderlineStyleAttributeName: 1
+            NSUnderlineStyleAttributeName: 1,
+            Cocoa.NSParagraphStyleAttributeName: paragraph_style
         }
         attributed = NSAttributedString.alloc().initWithString_attributes_(
             "doiter by rasskazchikov.de",
             attributes
         )
         self.footer_label.setAttributedStringValue_(attributed)
+
+    def windowDidResize_(self, window):
+        """Called when the window is resized - update UI layout."""
+        frame = window.frame()
+        new_width = frame.size.width
+        new_height = frame.size.height
+
+        # Update stored dimensions
+        self.width = new_width
+        self.height = new_height
+
+        # Recalculate positions and sizes
+        input_height = 44
+        input_top = new_height - 72
+
+        # Update input field
+        self.input_field.setFrame_(NSMakeRect(20, input_top, new_width - 40, input_height))
+
+        # Update separator
+        separator_y = input_top - 4
+        if hasattr(self, 'separator'):
+            self.separator.setFrame_(NSMakeRect(20, separator_y, new_width - 40, 1))
+
+        # Update status label
+        status_height = 16
+        status_y = separator_y - status_height - 6
+        if self.status_label:
+            self.status_label.setFrame_(NSMakeRect(20, status_y, new_width - 40, status_height))
+
+        # Update footer
+        footer_height = 18
+        footer_y = 20
+        if self.footer_label:
+            self.footer_label.setFrame_(NSMakeRect(0, footer_y, new_width, footer_height))
+
+        # Update scroll view
+        scroll_top = status_y - 8
+        scroll_height = scroll_top - footer_y - footer_height - 8
+        scroll_height = max(scroll_height, 80)
+        if hasattr(self, 'scroll_view'):
+            self.scroll_view.setFrame_(NSMakeRect(20, footer_y + footer_height + 8, new_width - 40, scroll_height))
+
+        # Update table column width
+        if hasattr(self, 'table_view') and self.table_view.tableColumns():
+            column = self.table_view.tableColumns()[0]
+            column.setWidth_(new_width - 60)
+
+        # Update resize handle position
+        resize_handle_size = 20
+        if hasattr(self, 'resize_handle'):
+            self.resize_handle.setFrame_(NSMakeRect(new_width - resize_handle_size, 0, resize_handle_size, resize_handle_size))
+
+        # Update toast position if visible
+        if self.toast_window and not self.toast_view.isHidden():
+            self._position_toast_window()
 
     def _apply_color_tag(self, tag_key: str) -> bool:
         """Toggle a color tag for the selected task."""
@@ -617,7 +821,16 @@ class OverlayWindow:
         task = self.current_tasks[self.selected_index]
         if not task:
             return False
-        return self.task_manager.toggle_color_tag(task['task_id'], tag_key)
+        had_tag = tag_key in (task.get('color_tags') or [])
+        updated_task = self.task_manager.toggle_color_tag(task['task_id'], tag_key)
+        if not updated_task:
+            return False
+
+        tags = updated_task.get('color_tags') or []
+        has_tag_now = tag_key in tags
+        if has_tag_now != had_tag:
+            self._show_tag_toast(has_tag_now, tag_key)
+        return True
 
     def _delete_selected_task(self) -> bool:
         """Delete the currently selected task if possible."""
@@ -630,8 +843,10 @@ class OverlayWindow:
         task = self.current_tasks[self.selected_index]
         deleted_index = self.selected_index
 
+        deleted_text = task.get('text', "")
         if not self.task_manager.delete_task(task['task_id']):
             return False
+        self._show_task_change_toast("delete", deleted_text)
 
         self._refresh_tasks()
         if len(self.current_tasks) == 0:
@@ -810,12 +1025,15 @@ class OverlayWindow:
             if self.is_editing:
                 # Save edited task
                 if text:
-                    self.task_manager.update_task(self.editing_task_id, text)
+                    if self.task_manager.update_task(self.editing_task_id, text):
+                        self._show_task_change_toast("update", text)
                 self._stop_editing()
                 self._refresh_tasks()
             elif text:
                 # Add new task
-                self.task_manager.add_task(text)
+                created = self.task_manager.add_task(text)
+                if created:
+                    self._show_task_change_toast("add", created.get('text', text))
                 self.input_field.setStringValue_("")
                 self._refresh_tasks()
             elif self.selected_index >= 0 and self.selected_index < len(self.current_tasks):
@@ -877,6 +1095,16 @@ class OverlayWindow:
             result = self.task_manager.redo()
             if result:
                 self._show_action_toast("Reapplied", result)
+            return True
+
+        # Cmd+C - copy current list view
+        elif cmd_pressed and not shift_pressed and key_code == 8:  # C
+            if self._copy_tasks_to_clipboard():
+                return True
+
+        # Cmd+S - toggle sort mode
+        elif cmd_pressed and not shift_pressed and key_code == 1:  # S
+            self._toggle_sort_mode()
             return True
 
         return False
@@ -949,7 +1177,83 @@ class OverlayWindow:
             return text
         return text[:limit - 3] + "..."
 
-    def _show_toast(self, message: str, duration: float = 1.0):
+    def _show_task_change_toast(self, action: str, text: str):
+        """Show contextual toast for add/edit/delete operations."""
+        verbs = {
+            'add': 'Added',
+            'update': 'Updated',
+            'delete': 'Removed'
+        }
+        icons = {
+            'add': '＋',
+            'update': '✎',
+            'delete': '－'
+        }
+        clean_text = (text or "").strip()
+        if clean_text:
+            clean_text = self._truncate_text(clean_text, 60)
+            message = f"{verbs.get(action, 'Updated')} \"{clean_text}\""
+        else:
+            message = verbs.get(action, 'Updated') + " task"
+        icon = icons.get(action)
+        if icon:
+            message = f"{icon} {message}"
+        self._show_toast(message)
+
+    def _show_tag_toast(self, added: bool, tag_key: str):
+        """Show toast when a color tag is toggled."""
+        name = COLOR_TAG_NAME_MAP.get(tag_key, tag_key.title())
+        icon = COLOR_TAG_EMOJI_MAP.get(tag_key, "🏷️")
+        verb = "Added" if added else "Removed"
+        message = f"{icon} {verb} {name} tag"
+        self._show_toast(message)
+
+    def _color_icon_prefix(self, task: Dict) -> str:
+        """Return emoji prefix for a task's color tags."""
+        tags = task.get('color_tags') or []
+        icons = [COLOR_TAG_EMOJI_MAP.get(tag, "") for tag in tags]
+        icons = [icon for icon in icons if icon]
+        if not icons:
+            return ""
+        return f"{' '.join(icons)} "
+
+    def _format_task_line(self, task: Dict) -> str:
+        """Format a task line for clipboard export."""
+        prefix = self._color_icon_prefix(task)
+        text = task.get('text', '') or ''
+        if self.is_editing and task.get('task_id') == self.editing_task_id:
+            preview = self.editing_preview_text if self.editing_preview_text is not None else text
+            preview_text = preview if preview is not None else ""
+            display = f"✎ {preview_text}"
+        else:
+            display = text
+        content = f"{prefix}{display}" if prefix else display
+        content = content.strip()
+        return f"- {content}" if content else "- "
+
+    def _copy_tasks_to_clipboard(self) -> bool:
+        """Copy the current task list to the clipboard."""
+        if not self.current_tasks:
+            self._show_toast("No tasks to copy")
+            return True
+
+        lines = [self._format_task_line(task) for task in self.current_tasks]
+        export = "\n".join(lines)
+
+        pasteboard = NSPasteboard.generalPasteboard()
+        pasteboard.clearContents()
+        pasteboard.declareTypes_owner_([NSPasteboardTypeString], None)
+        success = pasteboard.setString_forType_(export, NSPasteboardTypeString)
+        if success:
+            count = len(lines)
+            plural = "" if count == 1 else "s"
+            self._show_toast(f"📋 Copied {count} task{plural}")
+            return True
+
+        self._show_toast("Failed to copy tasks")
+        return False
+
+    def _show_toast(self, message: str, duration: float = 3.0):
         """Display the toast message for a limited time."""
         if not self.toast_view or not self.toast_label or not self.toast_window:
             return
@@ -1001,6 +1305,18 @@ class OverlayWindow:
         y = overlay_frame.origin.y + overlay_frame.size.height + 12
         new_frame = NSMakeRect(x, y, toast_frame.size.width, toast_frame.size.height)
         self.toast_window.setFrame_display_(new_frame, False)
+
+    def _toggle_sort_mode(self):
+        """Toggle between sort by position and sort by tags."""
+        if self.sort_mode == "position":
+            self.sort_mode = "tags"
+            message = "Sorting by tags (1-7)"
+        else:
+            self.sort_mode = "position"
+            message = "Sorting by creation order"
+
+        self._show_toast(message, duration=3.0)
+        self._refresh_tasks()
 
     def _handle_escape(self) -> bool:
         """Centralized escape key handling."""

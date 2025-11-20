@@ -162,16 +162,20 @@ class Database:
         updated_row = cursor.fetchone()
         return self._row_to_task(updated_row) if updated_row else None
 
-    def get_all_tasks(self) -> List[Dict]:
-        """Get all tasks ordered by position (newest first)."""
+    def get_all_tasks(self, sort_by: str = "position") -> List[Dict]:
+        """Get all tasks ordered by position (newest first) or by tags."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM tasks ORDER BY position DESC")
-        return [self._row_to_task(row) for row in cursor.fetchall()]
+        tasks = [self._row_to_task(row) for row in cursor.fetchall()]
 
-    def search_tasks(self, query: str) -> List[Dict]:
+        if sort_by == "tags":
+            return self._sort_by_tags(tasks)
+        return tasks
+
+    def search_tasks(self, query: str, sort_by: str = "position") -> List[Dict]:
         """Search tasks with case-insensitive fuzzy matching."""
         if not query:
-            return self.get_all_tasks()
+            return self.get_all_tasks(sort_by)
 
         cursor = self.conn.cursor()
         # Simple fuzzy search: contains all characters in order
@@ -182,7 +186,35 @@ class Database:
             ORDER BY position DESC
         """, (like_pattern,))
 
-        return [self._row_to_task(row) for row in cursor.fetchall()]
+        tasks = [self._row_to_task(row) for row in cursor.fetchall()]
+        if sort_by == "tags":
+            return self._sort_by_tags(tasks)
+        return tasks
+
+    def _sort_by_tags(self, tasks: List[Dict]) -> List[Dict]:
+        """Sort tasks by their most important color tag (1-7), then by position."""
+        # Color tag priority: red=1, orange=2, yellow=3, green=4, blue=5, purple=6, gray=7
+        tag_priority = {
+            'red': 1,
+            'orange': 2,
+            'yellow': 3,
+            'green': 4,
+            'blue': 5,
+            'purple': 6,
+            'gray': 7
+        }
+
+        def get_min_tag_priority(task: Dict) -> int:
+            """Get the minimum (most important) tag priority for a task."""
+            tags = task.get('color_tags', [])
+            if not tags:
+                return 999  # Tasks without tags go to the end
+
+            priorities = [tag_priority.get(tag, 999) for tag in tags]
+            return min(priorities)
+
+        # Sort by tag priority (ascending), then by position (descending for newest first)
+        return sorted(tasks, key=lambda t: (get_min_tag_priority(t), -t.get('position', 0)))
 
     def _record_undo(self, action: str, task: Dict):
         """Record an action in the undo stack."""
