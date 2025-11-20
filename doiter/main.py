@@ -71,6 +71,9 @@ class DoiterApp:
             print("Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy > Accessibility")
             return 1
 
+        # Show overlay on launch
+        self.overlay.show()
+
         # Run the application
         try:
             self.app.run()

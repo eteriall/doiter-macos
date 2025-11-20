@@ -12,7 +12,7 @@ DATA_FILES = [
 ]
 OPTIONS = {
     'argv_emulation': False,
-    'iconfile': None,
+    'iconfile': 'doiter/resources/app.icns',
     'plist': {
         'CFBundleName': 'doiter',
         'CFBundleDisplayName': 'doiter',
@@ -26,6 +26,7 @@ OPTIONS = {
     },
     'packages': ['src', 'sqlite3', 'Cocoa', 'Quartz', 'Foundation', 'AppKit'],
     'includes': [
+        'imp',  # Required because PyObjC still imports imp internally
         'objc',
         'Foundation',
         'AppKit',

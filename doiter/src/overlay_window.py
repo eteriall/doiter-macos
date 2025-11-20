@@ -1,18 +1,22 @@
 import Cocoa
 import objc
-from Foundation import NSObject, NSMakeRect, NSMakePoint, NSMakeSize
+from Foundation import NSObject, NSMakeRect, NSMakePoint, NSMakeSize, NSTimer, NSURL
 from AppKit import (
     NSWindow, NSView, NSTextField, NSScrollView, NSTableView, NSTableColumn,
     NSColor, NSFont, NSBorderlessWindowMask, NSFloatingWindowLevel,
     NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary,
     NSBackingStoreBuffered, NSVisualEffectView, NSVisualEffectMaterialHUDWindow,
     NSVisualEffectBlendingModeBehindWindow, NSApplication, NSApp,
-    NSTextFieldCell, NSLeftTextAlignment, NSAttributedString,
+    NSTextFieldCell, NSLeftTextAlignment, NSCenterTextAlignment, NSAttributedString,
     NSWindowStyleMaskBorderless, NSWindowStyleMaskFullSizeContentView,
     NSWindowCollectionBehaviorTransient, NSWindowCollectionBehaviorIgnoresCycle,
-    NSEvent, NSEventMaskKeyDown
+    NSEvent, NSEventMaskKeyDown, NSPanel, NSViewWidthSizable, NSViewHeightSizable,
+    NSWorkspace, NSFontAttributeName, NSForegroundColorAttributeName,
+    NSUnderlineStyleAttributeName
 )
 from typing import List, Dict, Optional, Callable
+
+from .color_tags import COLOR_TAG_EMOJI_MAP, COLOR_TAG_KEYCODE_MAP
 
 
 class KeyableWindow(NSWindow):
@@ -69,6 +73,28 @@ class CustomTextField(NSTextField):
         objc.super(CustomTextField, self).keyDown_(event)
 
 
+class ClickableLabel(NSTextField):
+    """Label that opens a URL when clicked."""
+
+    def init(self):
+        self = objc.super(ClickableLabel, self).init()
+        if self is None:
+            return None
+        self.url = None
+        return self
+
+    def setURL_(self, url: str):
+        self.url = url
+
+    def mouseDown_(self, event):
+        if self.url:
+            nsurl = NSURL.URLWithString_(self.url)
+            if nsurl:
+                NSWorkspace.sharedWorkspace().openURL_(nsurl)
+        else:
+            objc.super(ClickableLabel, self).mouseDown_(event)
+
+
 class TaskTableDelegate(NSObject):
     """Delegate for handling table view data source and selection."""
 
@@ -106,12 +132,27 @@ class TaskTableDelegate(NSObject):
         """Return value for cell."""
         if row < len(self.tasks):
             task = self.tasks[row]
-            text = task['text']
+            text = task.get('text', '')
+            prefix = self._color_prefix(task)
             if self.editing_task_id and task['task_id'] == self.editing_task_id:
                 preview = self.editing_preview_text if self.editing_preview_text is not None else text
-                return f"✎ {preview}"
-            return text
+                preview_text = preview if preview is not None else ""
+                display = f"✎ {preview_text}"
+            else:
+                display = text
+            if prefix:
+                return f"{prefix}{display}"
+            return display
         return ""
+
+    def _color_prefix(self, task: Dict) -> str:
+        """Return the emoji prefix for a task's color tags."""
+        tags = task.get('color_tags') or []
+        icons = [COLOR_TAG_EMOJI_MAP.get(tag, "") for tag in tags]
+        icons = [icon for icon in icons if icon]
+        if not icons:
+            return ""
+        return f"{' '.join(icons)} "
 
     def tableViewSelectionDidChange_(self, notification):
         """Handle selection change."""
@@ -119,6 +160,24 @@ class TaskTableDelegate(NSObject):
             tableView = notification.object()
             selected_row = tableView.selectedRow()
             self.selection_callback(selected_row)
+
+
+class ToastTimerHandler(NSObject):
+    """Helper to bridge NSTimer callbacks to the overlay."""
+
+    def init(self):
+        self = objc.super(ToastTimerHandler, self).init()
+        if self is None:
+            return None
+        self.overlay = None
+        return self
+
+    def setOverlay_(self, overlay):
+        self.overlay = overlay
+
+    def handleToastTimer_(self, timer):
+        if self.overlay:
+            self.overlay._toast_timer_fired()
 
 
 class OverlayWindow:
@@ -134,6 +193,14 @@ class OverlayWindow:
         self.editing_task_id = None  # Track which task is being edited
         self.editing_preview_text = ""
         self.key_event_monitor = None
+        self.toast_view = None
+        self.toast_label = None
+        self.toast_timer = None
+        self.toast_window = None
+        self.status_label = None
+        self.footer_label = None
+        self.toast_timer_handler = ToastTimerHandler.alloc().init()
+        self.toast_timer_handler.setOverlay_(self)
 
         # Window dimensions
         self.width = 500
@@ -182,10 +249,19 @@ class OverlayWindow:
             NSWindowCollectionBehaviorIgnoresCycle
         )
 
-        # Create visual effect view (blur background)
-        effect_view = NSVisualEffectView.alloc().initWithFrame_(
+        # Create wrapper view that enforces rounded corners
+        wrapper_view = NSView.alloc().initWithFrame_(
             NSMakeRect(0, 0, self.width, self.height)
         )
+        wrapper_view.setWantsLayer_(True)
+        wrapper_layer = wrapper_view.layer()
+        wrapper_layer.setCornerRadius_(12.0)
+        wrapper_layer.setMasksToBounds_(True)
+        wrapper_layer.setBackgroundColor_(NSColor.clearColor().CGColor())
+
+        # Create visual effect view (blur background)
+        effect_view = NSVisualEffectView.alloc().initWithFrame_(wrapper_view.bounds())
+        effect_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         effect_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
         effect_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         effect_view.setState_(1)  # Active state
@@ -193,15 +269,17 @@ class OverlayWindow:
         effect_view.layer().setCornerRadius_(12.0)
         effect_view.layer().setMasksToBounds_(True)
 
-        self.window.setContentView_(effect_view)
+        wrapper_view.addSubview_(effect_view)
+        self.window.setContentView_(wrapper_view)
         self.container = effect_view
 
     def _create_ui(self):
         """Create UI elements."""
         # Input text field - styled like Spotlight
-        input_top = self.height - 70
+        input_height = 44
+        input_top = self.height - 72
         self.input_field = CustomTextField.alloc().init()
-        self.input_field.setFrame_(NSMakeRect(20, input_top, self.width - 40, 50))
+        self.input_field.setFrame_(NSMakeRect(20, input_top, self.width - 40, input_height))
         self.input_field.setPlaceholderString_("Add or search tasks...")
         self.input_field.setFont_(NSFont.systemFontOfSize_(24))
         self.input_field.setBordered_(False)
@@ -233,7 +311,7 @@ class OverlayWindow:
         self.input_field.setKeyHandler_(self.handle_key_event)
 
         # Add separator line below input
-        separator_y = input_top - 10
+        separator_y = input_top - 4
         separator = NSView.alloc().initWithFrame_(
             NSMakeRect(20, separator_y, self.width - 40, 1)
         )
@@ -242,9 +320,44 @@ class OverlayWindow:
             NSColor.separatorColor().CGColor()
         )
 
-        # Create scroll view for tasks - below separator
+        status_height = 16
+        status_y = separator_y - status_height - 6
+        self.status_label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(20, status_y, self.width - 40, status_height)
+        )
+        self.status_label.setEditable_(False)
+        self.status_label.setBordered_(False)
+        self.status_label.setDrawsBackground_(False)
+        self.status_label.setSelectable_(False)
+        self.status_label.setFont_(NSFont.systemFontOfSize_(12))
+        self.status_label.setTextColor_(NSColor.secondaryLabelColor())
+        self.status_label.setAlignment_(NSCenterTextAlignment)
+
+        scroll_top = status_y - 8
+        scroll_height = scroll_top - 60
+        scroll_height = max(scroll_height, 80)
+
+        # Footer label
+        footer_height = 18
+        footer_margin = 24
+        footer_y = 20
+        self.footer_label = ClickableLabel.alloc().initWithFrame_(
+            NSMakeRect(20, footer_y, self.width - 40, footer_height)
+        )
+        self.footer_label.setEditable_(False)
+        self.footer_label.setBordered_(False)
+        self.footer_label.setBezeled_(False)
+        self.footer_label.setDrawsBackground_(False)
+        self.footer_label.setSelectable_(False)
+        self.footer_label.setFont_(NSFont.systemFontOfSize_(12))
+        self.footer_label.setTextColor_(NSColor.secondaryLabelColor())
+        self.footer_label.setAlignment_(NSCenterTextAlignment)
+        self.footer_label.setStringValue_("doiter by rasskazchikov.de")
+        self.footer_label.setURL_("https://rasskazchikov.de")
+
+        # Create scroll view for tasks - above footer
         scroll_view = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(20, 20, self.width - 40, separator_y - 30)
+            NSMakeRect(20, footer_y + footer_height + 8, self.width - 40, scroll_height)
         )
         scroll_view.setHasVerticalScroller_(True)
         scroll_view.setAutohidesScrollers_(True)
@@ -255,7 +368,7 @@ class OverlayWindow:
         self.table_view = NSTableView.alloc().initWithFrame_(scroll_view.bounds())
         self.table_view.setBackgroundColor_(NSColor.clearColor())
         self.table_view.setGridStyleMask_(0)  # No grid
-        self.table_view.setRowHeight_(44)  # Taller rows like Spotlight
+        self.table_view.setRowHeight_(52)  # Allow larger font for rows
         self.table_view.setHeaderView_(None)
         self.table_view.setFocusRingType_(0)  # No focus ring
         self.table_view.setAllowsEmptySelection_(True)
@@ -265,6 +378,9 @@ class OverlayWindow:
         column = NSTableColumn.alloc().initWithIdentifier_("tasks")
         column.setWidth_(self.width - 60)
         self.table_view.addTableColumn_(column)
+        data_cell = column.dataCell()
+        if data_cell:
+            data_cell.setFont_(NSFont.systemFontOfSize_(24))
 
         # Create and set delegate
         self.delegate = TaskTableDelegate.alloc().init()
@@ -277,7 +393,68 @@ class OverlayWindow:
         # Add views to container
         self.container.addSubview_(self.input_field)
         self.container.addSubview_(separator)
+        if self.status_label:
+            self.container.addSubview_(self.status_label)
         self.container.addSubview_(scroll_view)
+        if self.footer_label:
+            self.container.addSubview_(self.footer_label)
+        self._create_toast_view()
+        self._update_status_hint()
+        self._update_footer_text()
+
+    def _create_toast_view(self):
+        """Create floating toast to show quick status messages."""
+        toast_width = 320
+        toast_height = 32
+
+        self.toast_view = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, toast_width, toast_height)
+        )
+        self.toast_view.setWantsLayer_(True)
+        toast_layer = self.toast_view.layer()
+        toast_layer.setCornerRadius_(8.0)
+        toast_layer.setMasksToBounds_(True)
+        toast_layer.setBackgroundColor_(NSColor.clearColor().CGColor())
+
+        effect_view = NSVisualEffectView.alloc().initWithFrame_(self.toast_view.bounds())
+        effect_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        effect_view.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        effect_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        effect_view.setState_(1)
+        effect_layer = effect_view.layer()
+        if effect_layer:
+            effect_layer.setCornerRadius_(8.0)
+            effect_layer.setMasksToBounds_(True)
+
+        self.toast_label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(12, 5, toast_width - 24, toast_height - 10)
+        )
+        self.toast_label.setEditable_(False)
+        self.toast_label.setBordered_(False)
+        self.toast_label.setDrawsBackground_(False)
+        self.toast_label.setBezeled_(False)
+        self.toast_label.setSelectable_(False)
+        self.toast_label.setFont_(NSFont.systemFontOfSize_(13))
+        self.toast_label.setTextColor_(NSColor.labelColor())
+        self.toast_label.setAlignment_(NSCenterTextAlignment)
+
+        effect_view.addSubview_(self.toast_label)
+        self.toast_view.addSubview_(effect_view)
+        self.toast_view.setHidden_(True)
+        self.toast_window = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, toast_width, toast_height),
+            NSWindowStyleMaskBorderless,
+            NSBackingStoreBuffered,
+            False
+        )
+        self.toast_window.setOpaque_(False)
+        self.toast_window.setBackgroundColor_(NSColor.clearColor())
+        self.toast_window.setLevel_(NSFloatingWindowLevel + 1)
+        self.toast_window.setHasShadow_(True)
+        self.toast_window.setHidesOnDeactivate_(False)
+        self.toast_window.setIgnoresMouseEvents_(True)
+        self.toast_window.setContentView_(self.toast_view)
+        self.toast_window.orderOut_(None)
 
     def _setup_observers(self):
         """Setup task manager observers."""
@@ -325,8 +502,8 @@ class OverlayWindow:
             if self._delete_selected_task():
                 return None
 
-        if cmd_pressed:
-            return event
+        if self.handle_key_event(event):
+            return None
 
         # If table view (or anything else) has focus and user starts typing, refocus input
         current_responder = self.window.firstResponder()
@@ -334,6 +511,7 @@ class OverlayWindow:
         if current_responder not in (self.input_field, input_editor):
             if self._is_text_input_event(event):
                 self.window.makeFirstResponder_(self.input_field)
+                self._update_status_hint()
         return event
 
     def _is_text_input_event(self, event) -> bool:
@@ -367,10 +545,12 @@ class OverlayWindow:
                 NSIndexSet.indexSetWithIndex_(self.selected_index),
                 False
             )
+        self._update_status_hint()
 
     def _on_selection_changed(self, row: int):
         """Handle selection change."""
         self.selected_index = row
+        self._update_status_hint()
 
     def _reload_row(self, row: int):
         """Reload a single row in the table view."""
@@ -387,6 +567,57 @@ class OverlayWindow:
         if editor:
             editor.resignFirstResponder()
         self.window.makeFirstResponder_(self.table_view)
+        self._update_status_hint()
+
+    def _update_status_hint(self):
+        """Update the contextual status text below the separator."""
+        if not self.status_label:
+            return
+
+        input_text = self.input_field.stringValue().strip()
+        has_input = len(input_text) > 0
+        has_tasks = len(self.current_tasks) > 0
+        table_focused = self._is_table_view_first_responder()
+
+        if self.is_editing:
+            message = "↩︎ Enter to save"
+        elif table_focused and has_tasks:
+            message = "↑ / ↓ to select task, ↩︎ Enter to edit"
+        elif has_input and has_tasks:
+            message = "↑ / ↓ to select task, ↩︎ Enter to create new task"
+        elif has_input:
+            message = "↩︎ Enter to create new task"
+        else:
+            message = "Start typing to add new task | ⌘+E or ⎋ to close"
+
+        self.status_label.setStringValue_(message)
+        self._update_footer_text()
+
+    def _update_footer_text(self):
+        """Apply underline styling to the footer link."""
+        if not self.footer_label:
+            return
+
+        attributes = {
+            NSFontAttributeName: NSFont.systemFontOfSize_(12),
+            NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+            NSUnderlineStyleAttributeName: 1
+        }
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            "doiter by rasskazchikov.de",
+            attributes
+        )
+        self.footer_label.setAttributedStringValue_(attributed)
+
+    def _apply_color_tag(self, tag_key: str) -> bool:
+        """Toggle a color tag for the selected task."""
+        if self.selected_index < 0 or self.selected_index >= len(self.current_tasks):
+            return False
+
+        task = self.current_tasks[self.selected_index]
+        if not task:
+            return False
+        return self.task_manager.toggle_color_tag(task['task_id'], tag_key)
 
     def _delete_selected_task(self) -> bool:
         """Delete the currently selected task if possible."""
@@ -437,6 +668,7 @@ class OverlayWindow:
         # Focus input field and select all text
         self.window.makeFirstResponder_(self.input_field)
         self.input_field.selectText_(None)
+        self._update_status_hint()
 
     def _update_editing_preview(self):
         """Update the preview text for the task currently being edited."""
@@ -465,6 +697,7 @@ class OverlayWindow:
                 NSIndexSet.indexSetWithIndex_(self.selected_index),
                 False
             )
+        self._update_status_hint()
 
     def show(self):
         """Show the overlay with animation."""
@@ -491,6 +724,7 @@ class OverlayWindow:
 
         # Set first responder
         self.window.makeFirstResponder_(self.input_field)
+        self._update_status_hint()
 
         # Animate appearance
         Cocoa.NSAnimationContext.runAnimationGroup_completionHandler_(
@@ -511,6 +745,7 @@ class OverlayWindow:
 
         # Make input field first responder again
         self.window.makeFirstResponder_(self.input_field)
+        self._update_status_hint()
 
         # Force text editing to start - this activates the cursor
         self.input_field.selectText_(self)
@@ -553,6 +788,7 @@ class OverlayWindow:
         else:
             # Only refresh/filter when not editing a task
             self._refresh_tasks()
+        self._update_status_hint()
 
     def control_textView_doCommandBySelector_(self, control, textView, commandSelector):
         """Handle text view commands (like Enter key)."""
@@ -606,6 +842,11 @@ class OverlayWindow:
             self.hide()
             return True
 
+        if cmd_pressed and not shift_pressed and key_code in COLOR_TAG_KEYCODE_MAP:
+            tag_key = COLOR_TAG_KEYCODE_MAP[key_code]
+            self._apply_color_tag(tag_key)
+            return True
+
         # Up arrow - navigate tasks (only when not editing)
         elif key_code == 126:  # Up arrow
             if self._move_selection(-1, focus_table=True):
@@ -626,14 +867,16 @@ class OverlayWindow:
 
         # Cmd+Z - undo
         elif cmd_pressed and not shift_pressed and key_code == 6:  # Z
-            self.task_manager.undo()
-            self._refresh_tasks()
+            result = self.task_manager.undo()
+            if result:
+                self._show_action_toast("Reverted", result)
             return True
 
         # Cmd+Shift+Z - redo
         elif cmd_pressed and shift_pressed and key_code == 6:  # Z
-            self.task_manager.redo()
-            self._refresh_tasks()
+            result = self.task_manager.redo()
+            if result:
+                self._show_action_toast("Reapplied", result)
             return True
 
         return False
@@ -667,12 +910,103 @@ class OverlayWindow:
 
         if focus_table:
             self._focus_task_list()
+        else:
+            self._update_status_hint()
         return True
+
+    def _show_action_toast(self, verb: str, action_info: Dict):
+        """Show a toast describing the undo/redo action."""
+        action = action_info.get('action')
+        task = action_info.get('task', {})
+        desc = self._action_description(action)
+        task_text = task.get('text', "") if isinstance(task, dict) else ""
+        if task_text:
+            task_text = self._truncate_text(task_text.strip(), 60)
+            message = f"{verb} {desc}: \"{task_text}\""
+        else:
+            message = f"{verb} {desc}"
+        icon = ""
+        if verb == "Reverted":
+            icon = "↩︎"
+        elif verb == "Reapplied":
+            icon = "↪︎"
+        if icon:
+            message = f"{icon} {message}"
+        self._show_toast(message)
+
+    def _action_description(self, action: Optional[str]) -> str:
+        """Readable description for task actions."""
+        mapping = {
+            'add': 'task creation',
+            'delete': 'task deletion',
+            'update': 'task edit'
+        }
+        return mapping.get(action, 'task change')
+
+    def _truncate_text(self, text: str, limit: int) -> str:
+        """Truncate text to a safe length for the toast."""
+        if len(text) <= limit:
+            return text
+        return text[:limit - 3] + "..."
+
+    def _show_toast(self, message: str, duration: float = 1.0):
+        """Display the toast message for a limited time."""
+        if not self.toast_view or not self.toast_label or not self.toast_window:
+            return
+
+        self._cancel_toast_timer()
+        self.toast_label.setStringValue_(message)
+        self.toast_view.setHidden_(False)
+        self.toast_view.setAlphaValue_(1.0)
+        self._position_toast_window()
+        self.toast_window.orderFront_(None)
+
+        self.toast_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            duration,
+            self.toast_timer_handler,
+            "handleToastTimer:",
+            None,
+            False
+        )
+
+    def _cancel_toast_timer(self):
+        """Invalidate the toast timer if active."""
+        if self.toast_timer is not None:
+            self.toast_timer.invalidate()
+            self.toast_timer = None
+
+    def _toast_timer_fired(self):
+        """Called when the toast timer completes."""
+        self.toast_timer = None
+        if self.toast_view:
+            self.toast_view.setHidden_(True)
+        if self.toast_window:
+            self.toast_window.orderOut_(None)
+
+    def _hide_toast(self):
+        """Immediately hide the toast."""
+        self._cancel_toast_timer()
+        if self.toast_view:
+            self.toast_view.setHidden_(True)
+        if self.toast_window:
+            self.toast_window.orderOut_(None)
+
+    def _position_toast_window(self):
+        """Place the toast window centered above the overlay window."""
+        if not self.toast_window or not self.window:
+            return
+        overlay_frame = self.window.frame()
+        toast_frame = self.toast_window.frame()
+        x = overlay_frame.origin.x + (overlay_frame.size.width - toast_frame.size.width) / 2
+        y = overlay_frame.origin.y + overlay_frame.size.height + 12
+        new_frame = NSMakeRect(x, y, toast_frame.size.width, toast_frame.size.height)
+        self.toast_window.setFrame_display_(new_frame, False)
 
     def _handle_escape(self) -> bool:
         """Centralized escape key handling."""
         if self.is_editing:
             self._stop_editing()
+            self._update_status_hint()
             return True
 
         if self.selected_index >= 0:
@@ -680,6 +1014,7 @@ class OverlayWindow:
             self.table_view.deselectAll_(None)
             self.input_field.setStringValue_("")
             self._refresh_tasks()
+            self._update_status_hint()
             return True
 
         if self.is_visible:

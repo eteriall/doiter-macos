@@ -48,6 +48,14 @@ class TaskManager:
             return True
         return False
 
+    def toggle_color_tag(self, task_id: str, tag_key: str) -> bool:
+        """Toggle a color tag on a task."""
+        result = self.db.toggle_color_tag(task_id, tag_key)
+        if result:
+            self.notify_observers()
+            return True
+        return False
+
     def get_tasks(self, filter_text: str = "") -> List[Dict]:
         """Get tasks filtered by search text."""
         self.current_filter = filter_text
@@ -55,19 +63,21 @@ class TaskManager:
             return self.db.search_tasks(filter_text)
         return self.db.get_all_tasks()
 
-    def undo(self) -> bool:
+    def undo(self) -> Optional[Dict]:
         """Undo the last operation."""
-        success = self.db.undo()
-        if success:
+        result = self.db.undo()
+        if result:
             self.notify_observers()
-        return success
+            return result
+        return None
 
-    def redo(self) -> bool:
+    def redo(self) -> Optional[Dict]:
         """Redo the last undone operation."""
-        success = self.db.redo()
-        if success:
+        result = self.db.redo()
+        if result:
             self.notify_observers()
-        return success
+            return result
+        return None
 
     def get_task_count(self) -> int:
         """Get total number of tasks."""
