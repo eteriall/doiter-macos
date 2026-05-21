@@ -18,12 +18,21 @@ cp -r dist/doiter.app /Applications/
 
 - **Cmd + E** - Open/close the overlay
 - **Type immediately** - Cursor auto-focuses, no mouse needed!
+- **Cmd + /** - Show keyboard shortcuts
 - **Type text** - Search existing tasks or enter new task
 - **Enter** - Add new task
 - **Up/Down arrows** - Navigate through tasks
+- **Cmd + Up/Down arrows** - Move selected task up or down
 - **Backspace** - Delete selected task
 - **Cmd + Z** - Undo last operation
 - **Cmd + Shift + Z** - Redo
+- **Cmd + D** - Set deadline on selected task (`today`, `tomorrow`, `14:30`, `2026-05-21 14:30`)
+- **Cmd + Shift + D** - Clear deadline
+- **Cmd + L** - Set planned slot on selected task (`14:00-15:30`, `today 14:00-15:30`)
+- **Cmd + Shift + L** - Clear planned slot
+- **Cmd + P** - Copy current task list view
+- **Cmd + T** - Start countdown timer on selected task (`25`, `25m`, `1h`, `1h 30m`), stop a running timer, or continue a stopped timer
+- **Cmd + Shift + T** - Cancel selected task timer
 - **Esc** - Close the overlay
 
 Look for the **✓** icon in your menu bar (top right). Click it to show doiter overlay or close application.

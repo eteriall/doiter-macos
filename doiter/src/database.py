@@ -2,11 +2,20 @@ import sqlite3
 import uuid
 import time
 import json
-import os
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
 from .color_tags import COLOR_TAG_KEY_ORDER
+
+SCHEDULING_COLUMNS = [
+    "deadline_at",
+    "planned_start_at",
+    "planned_end_at",
+    "timer_started_at",
+    "timer_ends_at",
+    "timer_duration_seconds",
+    "timer_paused_remaining_seconds",
+]
 
 
 class Database:
@@ -37,10 +46,17 @@ class Database:
                 updated_at REAL NOT NULL,
                 completed INTEGER DEFAULT 0,
                 position INTEGER DEFAULT 0,
-                color_tags TEXT DEFAULT '[]'
+                color_tags TEXT DEFAULT '[]',
+                deadline_at REAL,
+                planned_start_at REAL,
+                planned_end_at REAL,
+                timer_started_at REAL,
+                timer_ends_at REAL,
+                timer_duration_seconds INTEGER,
+                timer_paused_remaining_seconds INTEGER
             )
         """)
-        self._ensure_color_tags_column(cursor)
+        self._ensure_task_columns(cursor)
 
         # Undo stack table
         cursor.execute("""
@@ -64,13 +80,17 @@ class Database:
 
         self.conn.commit()
 
-    def _ensure_color_tags_column(self, cursor: sqlite3.Cursor):
-        """Add the color_tags column to existing installs."""
+    def _ensure_task_columns(self, cursor: sqlite3.Cursor):
+        """Add newly introduced task columns to existing installs."""
         cursor.execute("PRAGMA table_info(tasks)")
         columns = [row["name"] for row in cursor.fetchall()]
         if "color_tags" not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN color_tags TEXT DEFAULT '[]'")
-            self.conn.commit()
+        for column in SCHEDULING_COLUMNS:
+            if column not in columns:
+                column_type = "INTEGER" if column == "timer_duration_seconds" else "REAL"
+                cursor.execute(f"ALTER TABLE tasks ADD COLUMN {column} {column_type}")
+        self.conn.commit()
 
     def add_task(self, text: str, record_undo: bool = True) -> Dict:
         """Add a new task and optionally record in undo stack."""
@@ -90,15 +110,30 @@ class Database:
             'updated_at': now,
             'completed': 0,
             'position': max_pos + 1,
-            'color_tags': []
+            'color_tags': [],
+            'deadline_at': None,
+            'planned_start_at': None,
+            'planned_end_at': None,
+            'timer_started_at': None,
+            'timer_ends_at': None,
+            'timer_duration_seconds': None,
+            'timer_paused_remaining_seconds': None
         }
 
         cursor.execute("""
-            INSERT INTO tasks (task_id, text, created_at, updated_at, completed, position, color_tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (
+                task_id, text, created_at, updated_at, completed, position, color_tags,
+                deadline_at, planned_start_at, planned_end_at,
+                timer_started_at, timer_ends_at, timer_duration_seconds,
+                timer_paused_remaining_seconds
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (task['task_id'], task['text'], task['created_at'],
               task['updated_at'], task['completed'], task['position'],
-              json.dumps(task['color_tags'])))
+              json.dumps(task['color_tags']), task['deadline_at'],
+              task['planned_start_at'], task['planned_end_at'],
+              task['timer_started_at'], task['timer_ends_at'],
+              task['timer_duration_seconds'], task['timer_paused_remaining_seconds']))
 
         self.conn.commit()
 
@@ -154,7 +189,8 @@ class Database:
         self.conn.commit()
 
         if record_undo:
-            self._record_undo('update', old_task)
+            updated_task = self.get_task(task_id)
+            self._record_undo('update', {'before': old_task, 'after': updated_task})
             self._clear_redo_stack()
 
         # Return updated task
@@ -248,6 +284,68 @@ class Database:
         cursor.execute("DELETE FROM redo_stack")
         self.conn.commit()
 
+    def get_task(self, task_id: str) -> Optional[Dict]:
+        """Return a single task by id."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        return self._row_to_task(row) if row else None
+
+    def _insert_task_snapshot(self, task: Dict):
+        """Insert a task snapshot exactly as stored in undo history."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO tasks (
+                task_id, text, created_at, updated_at, completed, position, color_tags,
+                deadline_at, planned_start_at, planned_end_at,
+                timer_started_at, timer_ends_at, timer_duration_seconds,
+                timer_paused_remaining_seconds
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (task['task_id'], task['text'], task['created_at'],
+              task['updated_at'], task.get('completed', 0), task.get('position', 0),
+              json.dumps(task.get('color_tags', [])), task.get('deadline_at'),
+              task.get('planned_start_at'), task.get('planned_end_at'),
+              task.get('timer_started_at'), task.get('timer_ends_at'),
+              task.get('timer_duration_seconds'), task.get('timer_paused_remaining_seconds')))
+        self.conn.commit()
+
+    def _restore_task_snapshot(self, task: Dict):
+        """Restore every mutable field from a task snapshot."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE tasks
+            SET text = ?, updated_at = ?, completed = ?, position = ?, color_tags = ?,
+                deadline_at = ?, planned_start_at = ?, planned_end_at = ?,
+                timer_started_at = ?, timer_ends_at = ?, timer_duration_seconds = ?,
+                timer_paused_remaining_seconds = ?
+            WHERE task_id = ?
+        """, (task['text'], task['updated_at'], task.get('completed', 0),
+              task.get('position', 0), json.dumps(task.get('color_tags', [])),
+              task.get('deadline_at'), task.get('planned_start_at'),
+              task.get('planned_end_at'), task.get('timer_started_at'),
+              task.get('timer_ends_at'), task.get('timer_duration_seconds'),
+              task.get('timer_paused_remaining_seconds'), task['task_id']))
+        self.conn.commit()
+
+    def _snapshot_before(self, payload: Dict) -> Dict:
+        return payload.get('before', payload)
+
+    def _snapshot_after(self, payload: Dict) -> Dict:
+        return payload.get('after', payload)
+
+    def _restore_reorder_snapshot(self, tasks: List[Dict]):
+        """Restore positions for multiple tasks from a reorder snapshot."""
+        cursor = self.conn.cursor()
+        now = time.time()
+        for task in tasks:
+            cursor.execute("""
+                UPDATE tasks
+                SET position = ?, updated_at = ?
+                WHERE task_id = ?
+            """, (task.get('position', 0), now, task['task_id']))
+        self.conn.commit()
+
     def undo(self) -> Optional[Dict]:
         """Undo the last operation and return action info."""
         cursor = self.conn.cursor()
@@ -262,7 +360,8 @@ class Database:
             return None
 
         action = row['action']
-        task = json.loads(row['task_snapshot'])
+        payload = json.loads(row['task_snapshot'])
+        task = self._snapshot_before(payload)
 
         # Perform reverse operation
         if action == 'add':
@@ -271,24 +370,15 @@ class Database:
             self._record_redo('add', task)
         elif action == 'delete':
             # Undo delete = add the task back
-            cursor.execute("""
-                INSERT INTO tasks (task_id, text, created_at, updated_at, completed, position, color_tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (task['task_id'], task['text'], task['created_at'],
-                  task['updated_at'], task['completed'], task['position'],
-                  json.dumps(task.get('color_tags', []))))
-            self.conn.commit()
+            self._insert_task_snapshot(task)
             self._record_redo('delete', task)
         elif action == 'update':
-            # Undo update = restore old text
-            cursor.execute("""
-                UPDATE tasks
-                SET text = ?, color_tags = ?, updated_at = ?
-                WHERE task_id = ?
-            """, (task['text'], json.dumps(task.get('color_tags', [])),
-                  task['updated_at'], task['task_id']))
-            self.conn.commit()
-            self._record_redo('update', task)
+            self._restore_task_snapshot(task)
+            self._record_redo('update', payload)
+        elif action == 'reorder':
+            before_tasks = payload.get('before', [])
+            self._restore_reorder_snapshot(before_tasks)
+            self._record_redo('reorder', payload)
 
         # Remove from undo stack
         cursor.execute("DELETE FROM undo_stack WHERE id = ?", (row['id'],))
@@ -313,32 +403,25 @@ class Database:
             return None
 
         action = row['action']
-        task = json.loads(row['task_snapshot'])
+        payload = json.loads(row['task_snapshot'])
+        task = self._snapshot_after(payload) if action == 'update' else self._snapshot_before(payload)
 
         # Perform the operation again
         if action == 'add':
             # Redo add = add the task back
-            cursor.execute("""
-                INSERT INTO tasks (task_id, text, created_at, updated_at, completed, position, color_tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (task['task_id'], task['text'], task['created_at'],
-                  task['updated_at'], task['completed'], task['position'],
-                  json.dumps(task.get('color_tags', []))))
-            self.conn.commit()
+            self._insert_task_snapshot(task)
             self._record_undo('add', task)
         elif action == 'delete':
             # Redo delete = delete the task
-            self.delete_task(task['task_id'], record_undo=True)
+            self.delete_task(task['task_id'], record_undo=False)
+            self._record_undo('delete', task)
         elif action == 'update':
-            # Redo update = restore the text again
-            cursor.execute("""
-                UPDATE tasks
-                SET text = ?, color_tags = ?, updated_at = ?
-                WHERE task_id = ?
-            """, (task['text'], json.dumps(task.get('color_tags', [])),
-                  task['updated_at'], task['task_id']))
-            self.conn.commit()
-            self._record_undo('update', task)
+            self._restore_task_snapshot(task)
+            self._record_undo('update', payload)
+        elif action == 'reorder':
+            after_tasks = payload.get('after', [])
+            self._restore_reorder_snapshot(after_tasks)
+            self._record_undo('reorder', payload)
 
         # Remove from redo stack
         cursor.execute("DELETE FROM redo_stack WHERE id = ?", (row['id'],))
@@ -348,6 +431,33 @@ class Database:
             'action': action,
             'task': task
         }
+
+    def swap_task_positions(self, task_id: str, other_task_id: str) -> Optional[Dict]:
+        """Swap two task positions and record a reorder undo entry."""
+        first = self.get_task(task_id)
+        second = self.get_task(other_task_id)
+        if not first or not second:
+            return None
+
+        before = [first, second]
+        now = time.time()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE tasks
+            SET position = ?, updated_at = ?
+            WHERE task_id = ?
+        """, (second.get('position', 0), now, first['task_id']))
+        cursor.execute("""
+            UPDATE tasks
+            SET position = ?, updated_at = ?
+            WHERE task_id = ?
+        """, (first.get('position', 0), now, second['task_id']))
+        self.conn.commit()
+
+        after = [self.get_task(task_id), self.get_task(other_task_id)]
+        self._record_undo('reorder', {'before': before, 'after': after})
+        self._clear_redo_stack()
+        return self.get_task(task_id)
 
     def close(self):
         """Close database connection."""
@@ -377,12 +487,36 @@ class Database:
         """, (json.dumps(tags), now, task_id))
         self.conn.commit()
 
-        self._record_undo('update', original_task)
-        self._clear_redo_stack()
-
         cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
         updated_row = cursor.fetchone()
-        return self._row_to_task(updated_row) if updated_row else None
+        updated_task = self._row_to_task(updated_row) if updated_row else None
+        if updated_task:
+            self._record_undo('update', {'before': original_task, 'after': updated_task})
+            self._clear_redo_stack()
+        return updated_task
+
+    def update_schedule(self, task_id: str, **fields) -> Optional[Dict]:
+        """Update scheduling fields for a task and record undo."""
+        allowed = set(SCHEDULING_COLUMNS)
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return self.get_task(task_id)
+
+        original_task = self.get_task(task_id)
+        if not original_task:
+            return None
+
+        updates['updated_at'] = time.time()
+        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+        values = list(updates.values()) + [task_id]
+        cursor = self.conn.cursor()
+        cursor.execute(f"UPDATE tasks SET {set_clause} WHERE task_id = ?", values)
+        self.conn.commit()
+
+        updated_task = self.get_task(task_id)
+        self._record_undo('update', {'before': original_task, 'after': updated_task})
+        self._clear_redo_stack()
+        return updated_task
 
     def _ordered_tags(self, tags: List[str]) -> List[str]:
         """Order tags consistently based on the palette definition."""
@@ -411,4 +545,6 @@ class Database:
             task['color_tags'] = raw_tags
         else:
             task['color_tags'] = []
+        for column in SCHEDULING_COLUMNS:
+            task.setdefault(column, None)
         return task
