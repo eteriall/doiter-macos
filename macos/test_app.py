@@ -43,4 +43,4 @@ task_manager.close()
 
 print("\nAll tests passed! The app should work correctly.")
 print("\nNote: The full app with GUI requires running in a proper macOS environment.")
-print("Run 'cd doiter && python3 main.py' to start the full application.")
+print("Run 'cd macos/doiter && python3 main.py' to start the full application.")

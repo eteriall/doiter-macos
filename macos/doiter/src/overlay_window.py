@@ -486,6 +486,7 @@ class OverlayWindow:
         self.notified_event_keys = set()
         self.command_mode = None
         self.sort_mode = "position"  # "position" or "tags"
+        self.completion_filter = "active"  # "active" or "completed"
 
         # Window dimensions
         self.width = 500
@@ -795,7 +796,8 @@ class OverlayWindow:
                 ("Enter", "create, edit, or save"),
                 ("Up / Down", "select task"),
                 ("Cmd+Up / Cmd+Down", "move selected task"),
-                ("Backspace", "delete selected task"),
+                ("Backspace", "complete or reopen selected task"),
+                ("Cmd+Backspace", "delete selected task"),
                 ("Cmd+Z / Cmd+Shift+Z", "undo / redo"),
             ]),
             ("Scheduling", [
@@ -811,6 +813,7 @@ class OverlayWindow:
             ("Tags and View", [
                 ("Cmd+1..7", "toggle color tag"),
                 ("Cmd+S", "toggle sort"),
+                ("Cmd+F", "toggle active/completed"),
                 ("Cmd+P", "copy task list"),
             ]),
             ("Input", [
@@ -953,7 +956,12 @@ class OverlayWindow:
     def _refresh_tasks(self):
         """Refresh the task list."""
         filter_text = "" if self.command_mode else self.input_field.stringValue()
-        self.current_tasks = self.task_manager.get_tasks(filter_text, self.sort_mode)
+        tasks = self.task_manager.get_tasks(filter_text, self.sort_mode)
+        show_completed = self.completion_filter == "completed"
+        self.current_tasks = [
+            task for task in tasks
+            if bool(task.get('completed', 0)) == show_completed
+        ]
         self.delegate.setTasks_(self.current_tasks)
         self.delegate.setEditingTaskId_(self.editing_task_id)
         preview = self.editing_preview_text if self.is_editing else ""
@@ -1056,13 +1064,15 @@ class OverlayWindow:
         if self.is_editing:
             message = "↩︎ Enter to save"
         elif table_focused and has_tasks:
-            message = "↑ / ↓ to select task, ↩︎ Enter to edit"
+            action = "reopen" if self.completion_filter == "completed" else "complete"
+            message = f"↑ / ↓ select, ↩︎ edit, Backspace to {action}"
         elif has_input and has_tasks:
             message = "↑ / ↓ to select task, ↩︎ Enter to create new task"
         elif has_input:
             message = "↩︎ Enter to create new task"
         else:
-            message = "Start typing to add new task | ⌘+/ for shortcuts"
+            view = "Completed" if self.completion_filter == "completed" else "Active"
+            message = f"{view} tasks | Start typing to add task | ⌘F toggle view"
 
         self.status_label.setStringValue_(message)
         self._update_footer_text()
@@ -1336,6 +1346,42 @@ class OverlayWindow:
         self.table_view.scrollRowToVisible_(new_index)
         return True
 
+    def _toggle_selected_task_completed(self) -> bool:
+        """Complete an active task or reopen a completed task."""
+        if self.is_editing or self.selected_index < 0:
+            return False
+
+        if self.selected_index >= len(self.current_tasks):
+            return False
+
+        task = self.current_tasks[self.selected_index]
+        original_index = self.selected_index
+        task_text = task.get('text', "")
+        if self.completion_filter == "completed":
+            updated = self.task_manager.reopen_task(task['task_id'])
+            action = "reopen"
+        else:
+            updated = self.task_manager.mark_completed(task['task_id'])
+            action = "complete"
+        if not updated:
+            return False
+
+        self._show_task_change_toast(action, task_text)
+        self._refresh_tasks()
+        if len(self.current_tasks) == 0:
+            self.selected_index = -1
+            return True
+
+        new_index = min(original_index, len(self.current_tasks) - 1)
+        self.selected_index = new_index
+        from Foundation import NSIndexSet
+        self.table_view.selectRowIndexes_byExtendingSelection_(
+            NSIndexSet.indexSetWithIndex_(new_index),
+            False
+        )
+        self.table_view.scrollRowToVisible_(new_index)
+        return True
+
     def _start_editing(self):
         """Start editing the selected task."""
         if self.selected_index < 0 or self.selected_index >= len(self.current_tasks):
@@ -1553,6 +1599,12 @@ class OverlayWindow:
         if cmd_pressed and not self.is_editing:
             if key_code == 44:  # Cmd+/
                 return self._toggle_help()
+            if key_code == 51:  # Cmd+Backspace/Delete
+                if self._delete_selected_task():
+                    return True
+                return False
+            if key_code == 3:  # Cmd+F
+                return self._toggle_completion_filter()
             if key_code == 126:  # Cmd+Up
                 return self._reorder_selected_task(-1)
             if key_code == 125:  # Cmd+Down
@@ -1591,11 +1643,11 @@ class OverlayWindow:
             if self._move_selection(1, focus_table=True):
                 return True
 
-        # Backspace - delete selected task (when not editing and input empty)
+        # Backspace - complete/reopen selected task (when not editing and input empty)
         elif key_code == 51:  # Backspace/Delete
             if not self.is_editing and self.selected_index >= 0:
                 if self._is_table_view_first_responder() or not self.input_field.stringValue():
-                    if self._delete_selected_task():
+                    if self._toggle_selected_task_completed():
                         return True
             return False
 
@@ -1712,7 +1764,8 @@ class OverlayWindow:
         mapping = {
             'add': 'task creation',
             'delete': 'task deletion',
-            'update': 'task edit'
+            'update': 'task update',
+            'reorder': 'task reorder'
         }
         return mapping.get(action, 'task change')
 
@@ -1727,12 +1780,16 @@ class OverlayWindow:
         verbs = {
             'add': 'Added',
             'update': 'Updated',
-            'delete': 'Removed'
+            'delete': 'Deleted',
+            'complete': 'Completed',
+            'reopen': 'Reopened'
         }
         icons = {
             'add': '＋',
             'update': '✎',
-            'delete': '－'
+            'delete': '－',
+            'complete': '✓',
+            'reopen': '↩︎'
         }
         clean_text = (text or "").strip()
         if clean_text:
@@ -1918,6 +1975,20 @@ class OverlayWindow:
 
         self._show_toast(message, duration=3.0)
         self._refresh_tasks()
+
+    def _toggle_completion_filter(self):
+        """Toggle between active and completed task views."""
+        self.completion_filter = "completed" if self.completion_filter == "active" else "active"
+        self.selected_index = 0
+        if self.completion_filter == "completed":
+            message = "Showing completed tasks"
+        else:
+            message = "Showing active tasks"
+        self._show_toast(message, duration=3.0)
+        self._refresh_tasks()
+        if not self.current_tasks:
+            self.selected_index = -1
+        return True
 
     def _handle_escape(self) -> bool:
         """Centralized escape key handling."""

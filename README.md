@@ -1,73 +1,83 @@
 # doiter
 
-A minimalistic macOS todo application like Spotlight search.
+Minimal macOS todo app with a Django sync backend.
+
+## Layout
+
+- `macos/` contains the PyObjC menu-bar app, local SQLite cache, py2app packaging, and macOS tests.
+- `backend/` contains the Django/DRF API, token auth, task sync endpoints, Unfold admin, and OpenAPI docs.
+
+## Backend
 
 ```bash
+cd backend
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py runserver
+```
+
+For persistent logins across server restarts, keep the same database file/volume and set a stable `DOITER_SECRET_KEY` in the server environment. JWT refresh tokens are per app/device and valid for 365 days unless that specific device logs out.
+
+API docs:
+
+- OpenAPI schema: `http://127.0.0.1:8000/api/schema/`
+- Swagger UI: `http://127.0.0.1:8000/api/docs/`
+- Admin: `http://127.0.0.1:8000/admin/`
+- Human API notes: `backend/docs/API.md`
+
+## macOS App
+
+```bash
+cd macos
 pip3 install -r requirements.txt
 ./build.sh
 cp -r dist/doiter.app /Applications/
 /Applications/doiter.app/Contents/Resources/install_autostart.sh
 ```
 
+The app stores its JWT access and refresh tokens in macOS Keychain. The server URL is configured from the menu-bar Settings window and defaults to:
 
-
-
-
-### Basic Operations
-
-
-- **Cmd + E** - Open/close the overlay
-- **Type immediately** - Cursor auto-focuses, no mouse needed!
-- **Cmd + /** - Show keyboard shortcuts
-- **Type text** - Search existing tasks or enter new task
-- **Enter** - Add new task
-- **Up/Down arrows** - Navigate through tasks
-- **Cmd + Up/Down arrows** - Move selected task up or down
-- **Backspace** - Delete selected task
-- **Cmd + Z** - Undo last operation
-- **Cmd + Shift + Z** - Redo
-- **Cmd + D** - Set deadline on selected task (`today`, `tomorrow`, `14:30`, `2026-05-21 14:30`)
-- **Cmd + Shift + D** - Clear deadline
-- **Cmd + L** - Set planned slot on selected task (`14:00-15:30`, `today 14:00-15:30`)
-- **Cmd + Shift + L** - Clear planned slot
-- **Cmd + P** - Copy current task list view
-- **Cmd + T** - Start countdown timer on selected task (`25`, `25m`, `1h`, `1h 30m`), stop a running timer, or continue a stopped timer
-- **Cmd + Shift + T** - Cancel selected task timer
-- **Esc** - Close the overlay
-
-Look for the **✓** icon in your menu bar (top right). Click it to show doiter overlay or close application.
-
-### Requirements
-
-- macOS 10.13 (High Sierra) or later
-- Python 3.8 or later
-- Accessibility permissions (for global hotkey)
-
-
-### Troubleshooting
-
-#### Hotkey not working
-
-Make sure doiter has Accessibility permissions:
-1. System Preferences > Security & Privacy > Privacy > Accessibility
-2. Click the lock to make changes
-3. Add doiter.app or check the box next to it
-
-#### App not starting on boot
-
-Check if the LaunchAgent is installed:
-```bash
-ls ~/Library/LaunchAgents/com.doiter.app.plist
+```text
+http://127.0.0.1:8000/api
 ```
 
-If not found, run the install script:
-```bash
-/Applications/doiter.app/Contents/Resources/install_autostart.sh
-```
+On first login, the app asks whether existing local tasks should be imported into the authenticated account. Tasks remain cached locally for offline use and sync when the backend is reachable.
 
-#### Reset all data
+## Basic Operations
 
-To clear all tasks and undo history:
+- `Cmd + E` - Open/close the overlay
+- Type immediately - Cursor auto-focuses
+- `Cmd + /` - Show keyboard shortcuts
+- Type text - Search existing tasks or enter a new task
+- `Enter` - Add or edit a task
+- `Up/Down` - Navigate through tasks
+- `Cmd + Up/Down` - Move selected task up or down
+- `Backspace` - Delete selected task
+- `Cmd + Z` - Undo last operation locally
+- `Cmd + Shift + Z` - Redo locally
+- `Cmd + D` - Set deadline
+- `Cmd + Shift + D` - Clear deadline
+- `Cmd + L` - Set planned slot
+- `Cmd + Shift + L` - Clear planned slot
+- `Cmd + P` - Copy current task list view
+- `Cmd + T` - Start, stop, or continue countdown timer
+- `Cmd + Shift + T` - Cancel selected task timer
+- `Esc` - Close the overlay
+
+## Troubleshooting
+
+If the global hotkey does not work, grant Accessibility permissions:
+
+1. System Settings > Privacy & Security > Accessibility
+2. Add `doiter.app` or enable it in the list
+
+To reset local app data:
+
 ```bash
 rm ~/Library/Application\ Support/doiter/doiter.db
+rm ~/Library/Application\ Support/doiter/config.json
+security delete-generic-password -s com.doiter.app -a api-token
 ```

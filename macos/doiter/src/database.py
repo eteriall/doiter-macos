@@ -17,6 +17,11 @@ SCHEDULING_COLUMNS = [
     "timer_paused_remaining_seconds",
 ]
 
+SYNC_COLUMNS = [
+    "remote_synced_at",
+    "sync_source",
+]
+
 
 class Database:
     """Manages SQLite database for tasks and undo/redo operations."""
@@ -53,7 +58,9 @@ class Database:
                 timer_started_at REAL,
                 timer_ends_at REAL,
                 timer_duration_seconds INTEGER,
-                timer_paused_remaining_seconds INTEGER
+                timer_paused_remaining_seconds INTEGER,
+                remote_synced_at REAL,
+                sync_source TEXT DEFAULT 'local'
             )
         """)
         self._ensure_task_columns(cursor)
@@ -78,6 +85,16 @@ class Database:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_sync (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                payload TEXT,
+                timestamp REAL NOT NULL
+            )
+        """)
+
         self.conn.commit()
 
     def _ensure_task_columns(self, cursor: sqlite3.Cursor):
@@ -90,6 +107,10 @@ class Database:
             if column not in columns:
                 column_type = "INTEGER" if column == "timer_duration_seconds" else "REAL"
                 cursor.execute(f"ALTER TABLE tasks ADD COLUMN {column} {column_type}")
+        if "remote_synced_at" not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN remote_synced_at REAL")
+        if "sync_source" not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN sync_source TEXT DEFAULT 'local'")
         self.conn.commit()
 
     def add_task(self, text: str, record_undo: bool = True) -> Dict:
@@ -125,15 +146,16 @@ class Database:
                 task_id, text, created_at, updated_at, completed, position, color_tags,
                 deadline_at, planned_start_at, planned_end_at,
                 timer_started_at, timer_ends_at, timer_duration_seconds,
-                timer_paused_remaining_seconds
+                timer_paused_remaining_seconds, remote_synced_at, sync_source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (task['task_id'], task['text'], task['created_at'],
               task['updated_at'], task['completed'], task['position'],
               json.dumps(task['color_tags']), task['deadline_at'],
               task['planned_start_at'], task['planned_end_at'],
               task['timer_started_at'], task['timer_ends_at'],
-              task['timer_duration_seconds'], task['timer_paused_remaining_seconds']))
+              task['timer_duration_seconds'], task['timer_paused_remaining_seconds'],
+              task.get('remote_synced_at'), task.get('sync_source', 'local')))
 
         self.conn.commit()
 
@@ -197,6 +219,29 @@ class Database:
         cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
         updated_row = cursor.fetchone()
         return self._row_to_task(updated_row) if updated_row else None
+
+    def set_task_completed(self, task_id: str, completed: bool, record_undo: bool = True) -> Optional[Dict]:
+        """Set a task's completion state and optionally record in undo stack."""
+        original_task = self.get_task(task_id)
+        if not original_task:
+            return None
+        if bool(original_task.get('completed', 0)) == bool(completed):
+            return original_task
+
+        now = time.time()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE tasks
+            SET completed = ?, updated_at = ?
+            WHERE task_id = ?
+        """, (1 if completed else 0, now, task_id))
+        self.conn.commit()
+
+        updated_task = self.get_task(task_id)
+        if record_undo and updated_task:
+            self._record_undo('update', {'before': original_task, 'after': updated_task})
+            self._clear_redo_stack()
+        return updated_task
 
     def get_all_tasks(self, sort_by: str = "position") -> List[Dict]:
         """Get all tasks ordered by position (newest first) or by tags."""
@@ -299,15 +344,16 @@ class Database:
                 task_id, text, created_at, updated_at, completed, position, color_tags,
                 deadline_at, planned_start_at, planned_end_at,
                 timer_started_at, timer_ends_at, timer_duration_seconds,
-                timer_paused_remaining_seconds
+                timer_paused_remaining_seconds, remote_synced_at, sync_source
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (task['task_id'], task['text'], task['created_at'],
               task['updated_at'], task.get('completed', 0), task.get('position', 0),
               json.dumps(task.get('color_tags', [])), task.get('deadline_at'),
               task.get('planned_start_at'), task.get('planned_end_at'),
               task.get('timer_started_at'), task.get('timer_ends_at'),
-              task.get('timer_duration_seconds'), task.get('timer_paused_remaining_seconds')))
+              task.get('timer_duration_seconds'), task.get('timer_paused_remaining_seconds'),
+              task.get('remote_synced_at'), task.get('sync_source', 'local')))
         self.conn.commit()
 
     def _restore_task_snapshot(self, task: Dict):
@@ -318,14 +364,15 @@ class Database:
             SET text = ?, updated_at = ?, completed = ?, position = ?, color_tags = ?,
                 deadline_at = ?, planned_start_at = ?, planned_end_at = ?,
                 timer_started_at = ?, timer_ends_at = ?, timer_duration_seconds = ?,
-                timer_paused_remaining_seconds = ?
+                timer_paused_remaining_seconds = ?, remote_synced_at = ?, sync_source = ?
             WHERE task_id = ?
         """, (task['text'], task['updated_at'], task.get('completed', 0),
               task.get('position', 0), json.dumps(task.get('color_tags', [])),
               task.get('deadline_at'), task.get('planned_start_at'),
               task.get('planned_end_at'), task.get('timer_started_at'),
               task.get('timer_ends_at'), task.get('timer_duration_seconds'),
-              task.get('timer_paused_remaining_seconds'), task['task_id']))
+              task.get('timer_paused_remaining_seconds'), task.get('remote_synced_at'),
+              task.get('sync_source', 'local'), task['task_id']))
         self.conn.commit()
 
     def _snapshot_before(self, payload: Dict) -> Dict:
@@ -432,8 +479,18 @@ class Database:
             'task': task
         }
 
-    def swap_task_positions(self, task_id: str, other_task_id: str) -> Optional[Dict]:
-        """Swap two task positions and record a reorder undo entry."""
+    def record_reorder(self, before: List[Dict], after: List[Dict]):
+        """Record a reorder undo entry from explicit before/after snapshots."""
+        self._record_undo('reorder', {'before': before, 'after': after})
+        self._clear_redo_stack()
+
+    def swap_task_positions(
+        self,
+        task_id: str,
+        other_task_id: str,
+        record_undo: bool = True,
+    ) -> Optional[Dict]:
+        """Swap two task positions and optionally record a reorder undo entry."""
         first = self.get_task(task_id)
         second = self.get_task(other_task_id)
         if not first or not second:
@@ -454,10 +511,140 @@ class Database:
         """, (first.get('position', 0), now, second['task_id']))
         self.conn.commit()
 
-        after = [self.get_task(task_id), self.get_task(other_task_id)]
-        self._record_undo('reorder', {'before': before, 'after': after})
-        self._clear_redo_stack()
+        if record_undo:
+            after = [self.get_task(task_id), self.get_task(other_task_id)]
+            self.record_reorder(before, after)
         return self.get_task(task_id)
+
+    def task_payload(self, task: Dict) -> Dict:
+        """Return a JSON-ready payload for the backend task API."""
+        payload = {
+            "task_id": task["task_id"],
+            "text": task.get("text", ""),
+            "created_at": task.get("created_at"),
+            "updated_at": task.get("updated_at"),
+            "completed": bool(task.get("completed", 0)),
+            "position": task.get("position", 0),
+            "color_tags": task.get("color_tags") or [],
+            "deadline_at": task.get("deadline_at"),
+            "planned_start_at": task.get("planned_start_at"),
+            "planned_end_at": task.get("planned_end_at"),
+            "timer_started_at": task.get("timer_started_at"),
+            "timer_ends_at": task.get("timer_ends_at"),
+            "timer_duration_seconds": task.get("timer_duration_seconds"),
+            "timer_paused_remaining_seconds": task.get("timer_paused_remaining_seconds"),
+            "client_updated_at": task.get("updated_at"),
+        }
+        return payload
+
+    def queue_sync(self, action: str, task: Dict):
+        """Queue a local mutation for background synchronization."""
+        if not task:
+            return
+        cursor = self.conn.cursor()
+        payload = None if action == "delete" else json.dumps(self.task_payload(task))
+        cursor.execute("""
+            INSERT INTO pending_sync (action, task_id, payload, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (action, task["task_id"], payload, time.time()))
+        self.conn.commit()
+
+    def get_pending_sync(self) -> List[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM pending_sync ORDER BY id ASC")
+        items = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"]) if item.get("payload") else None
+            items.append(item)
+        return items
+
+    def pending_sync_count(self) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS count FROM pending_sync")
+        row = cursor.fetchone()
+        return int(row["count"] if row else 0)
+
+    def mark_sync_done(self, sync_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM pending_sync WHERE id = ?", (sync_id,))
+        self.conn.commit()
+
+    def has_pending_sync(self) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM pending_sync LIMIT 1")
+        return cursor.fetchone() is not None
+
+    def mark_task_synced(self, task_id: str, synced_at: Optional[float] = None):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE tasks
+            SET remote_synced_at = ?, sync_source = 'remote'
+            WHERE task_id = ?
+        """, (synced_at or time.time(), task_id))
+        self.conn.commit()
+
+    def apply_remote_tasks(self, tasks: List[Dict]):
+        """Apply server state. Server wins for matching task IDs."""
+        cursor = self.conn.cursor()
+        remote_ids = set()
+        for task in tasks:
+            normalized = self._normalize_remote_task(task)
+            remote_ids.add(normalized["task_id"])
+            cursor.execute("""
+                INSERT INTO tasks (
+                    task_id, text, created_at, updated_at, completed, position, color_tags,
+                    deadline_at, planned_start_at, planned_end_at,
+                    timer_started_at, timer_ends_at, timer_duration_seconds,
+                    timer_paused_remaining_seconds, remote_synced_at, sync_source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote')
+                ON CONFLICT(task_id) DO UPDATE SET
+                    text = excluded.text,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    completed = excluded.completed,
+                    position = excluded.position,
+                    color_tags = excluded.color_tags,
+                    deadline_at = excluded.deadline_at,
+                    planned_start_at = excluded.planned_start_at,
+                    planned_end_at = excluded.planned_end_at,
+                    timer_started_at = excluded.timer_started_at,
+                    timer_ends_at = excluded.timer_ends_at,
+                    timer_duration_seconds = excluded.timer_duration_seconds,
+                    timer_paused_remaining_seconds = excluded.timer_paused_remaining_seconds,
+                    remote_synced_at = excluded.remote_synced_at,
+                    sync_source = 'remote'
+            """, (
+                normalized["task_id"], normalized["text"], normalized["created_at"],
+                normalized["updated_at"], int(normalized.get("completed", 0)),
+                normalized.get("position", 0), json.dumps(normalized.get("color_tags", [])),
+                normalized.get("deadline_at"), normalized.get("planned_start_at"),
+                normalized.get("planned_end_at"), normalized.get("timer_started_at"),
+                normalized.get("timer_ends_at"), normalized.get("timer_duration_seconds"),
+                normalized.get("timer_paused_remaining_seconds"), normalized.get("remote_synced_at"),
+            ))
+
+        if not self.has_pending_sync():
+            placeholders = ",".join(["?"] * len(remote_ids))
+            if remote_ids:
+                cursor.execute(f"DELETE FROM tasks WHERE task_id NOT IN ({placeholders})", list(remote_ids))
+            else:
+                cursor.execute("DELETE FROM tasks")
+        self.conn.commit()
+
+    def import_local_tasks_to_sync_queue(self):
+        """Queue all current local tasks for upload after first login."""
+        for task in self.get_all_tasks():
+            self.queue_sync("upsert", task)
+
+    def _normalize_remote_task(self, task: Dict) -> Dict:
+        normalized = dict(task)
+        normalized["task_id"] = str(normalized.get("task_id") or normalized.get("id"))
+        normalized["completed"] = int(bool(normalized.get("completed", 0)))
+        normalized["color_tags"] = normalized.get("color_tags") or []
+        normalized["remote_synced_at"] = normalized.get("synced_at") or time.time()
+        return normalized
 
     def close(self):
         """Close database connection."""
@@ -546,5 +733,7 @@ class Database:
         else:
             task['color_tags'] = []
         for column in SCHEDULING_COLUMNS:
+            task.setdefault(column, None)
+        for column in SYNC_COLUMNS:
             task.setdefault(column, None)
         return task

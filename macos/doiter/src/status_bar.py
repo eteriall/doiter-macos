@@ -15,6 +15,9 @@ class StatusBarDelegate(NSObject):
         if self is None:
             return None
         self.show_callback = None
+        self.auth_callback = None
+        self.settings_callback = None
+        self.logout_callback = None
         self.quit_callback = None
         return self
 
@@ -26,21 +29,49 @@ class StatusBarDelegate(NSObject):
         """Set callback for quitting app."""
         self.quit_callback = callback
 
+    def setAuthCallback_(self, callback: Callable):
+        self.auth_callback = callback
+
+    def setSettingsCallback_(self, callback: Callable):
+        self.settings_callback = callback
+
+    def setLogoutCallback_(self, callback: Callable):
+        self.logout_callback = callback
+
     def showOverlay_(self, sender):
         """Handle show overlay menu item."""
         if self.show_callback:
             self.show_callback()
+
+    def showAuth_(self, sender):
+        if self.auth_callback:
+            self.auth_callback()
 
     def quitApp_(self, sender):
         """Handle quit menu item."""
         if self.quit_callback:
             self.quit_callback()
 
+    def showSettings_(self, sender):
+        if self.settings_callback:
+            self.settings_callback()
+
+    def logout_(self, sender):
+        if self.logout_callback:
+            self.logout_callback()
+
 
 class StatusBar:
     """macOS status bar (menu bar) icon with menu."""
 
-    def __init__(self, show_callback: Callable, quit_callback: Callable):
+    def __init__(
+        self,
+        show_callback: Callable,
+        quit_callback: Callable,
+        auth_callback: Callable = None,
+        settings_callback: Callable = None,
+        logout_callback: Callable = None,
+    ):
         """Initialize status bar icon."""
         self.show_callback = show_callback
         self.quit_callback = quit_callback
@@ -63,6 +94,9 @@ class StatusBar:
         self.delegate = StatusBarDelegate.alloc().init()
         self.delegate.setShowCallback_(show_callback)
         self.delegate.setQuitCallback_(quit_callback)
+        self.delegate.setAuthCallback_(auth_callback)
+        self.delegate.setSettingsCallback_(settings_callback)
+        self.delegate.setLogoutCallback_(logout_callback)
 
         # Add menu items
         show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -72,6 +106,30 @@ class StatusBar:
         )
         show_item.setTarget_(self.delegate)
         self.menu.addItem_(show_item)
+
+        self.auth_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Login / Register",
+            "showAuth:",
+            ""
+        )
+        self.auth_item.setTarget_(self.delegate)
+        self.menu.addItem_(self.auth_item)
+
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Settings...",
+            "showSettings:",
+            ","
+        )
+        settings_item.setTarget_(self.delegate)
+        self.menu.addItem_(settings_item)
+
+        self.logout_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Logout",
+            "logout:",
+            ""
+        )
+        self.logout_item.setTarget_(self.delegate)
+        self.menu.addItem_(self.logout_item)
 
         # Add separator
         self.menu.addItem_(NSMenuItem.separatorItem())
@@ -91,3 +149,8 @@ class StatusBar:
     def remove(self):
         """Remove status bar icon."""
         self.status_bar.removeStatusItem_(self.status_item)
+
+    def set_authenticated(self, authenticated: bool):
+        """Show only the account action that matches the current login state."""
+        self.auth_item.setHidden_(authenticated)
+        self.logout_item.setHidden_(not authenticated)

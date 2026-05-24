@@ -23,6 +23,7 @@ MANIFEST
 
 # Virtual environments
 venv/
+.venv/
 ENV/
 env/
 
@@ -44,6 +45,8 @@ env/
 *.app
 doiter.db
 doiter.db-journal
+backend/db.sqlite3
+backend/staticfiles/
 
 # Logs
 *.log

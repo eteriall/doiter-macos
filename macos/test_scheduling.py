@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 
 from doiter.src.database import Database
+from doiter.src.task_manager import TaskManager
 from doiter.src.scheduling import (
     ScheduleParseError,
     format_task_badge,
@@ -129,6 +130,94 @@ class SchedulingDatabaseTests(unittest.TestCase):
 
         self.db.redo()
         self.assertEqual([task["text"] for task in self.db.get_all_tasks()], ["first", "second"])
+
+    def test_set_task_completed_and_undo_redo(self):
+        task = self.db.add_task("task")
+
+        self.db.set_task_completed(task["task_id"], True)
+        self.assertEqual(self.db.get_task(task["task_id"])["completed"], 1)
+
+        self.db.undo()
+        self.assertEqual(self.db.get_task(task["task_id"])["completed"], 0)
+
+        self.db.redo()
+        self.assertEqual(self.db.get_task(task["task_id"])["completed"], 1)
+
+
+class TaskManagerReorderTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.manager = TaskManager(self.path)
+
+    def tearDown(self):
+        self.manager.close()
+        os.remove(self.path)
+
+    def test_reorder_sync_and_undo_are_debounced_until_commit(self):
+        first = self.manager.db.add_task("first")
+        second = self.manager.db.add_task("second")
+        third = self.manager.db.add_task("third")
+
+        sync_triggers = []
+        self.manager.set_sync_trigger(lambda: sync_triggers.append("sync"))
+
+        self.assertEqual(
+            [task["text"] for task in self.manager.get_tasks()],
+            ["third", "second", "first"],
+        )
+
+        self.manager.swap_task_positions(third["task_id"], second["task_id"])
+        self.manager.swap_task_positions(third["task_id"], first["task_id"])
+
+        self.assertEqual(
+            [task["text"] for task in self.manager.get_tasks()],
+            ["second", "first", "third"],
+        )
+        self.assertEqual(self.manager.pending_sync_count(), 0)
+        self.assertEqual(sync_triggers, [])
+
+        self.manager.commit_pending_reorder()
+
+        self.assertEqual(self.manager.pending_sync_count(), 3)
+        self.assertEqual(sync_triggers, ["sync", "sync", "sync"])
+
+        self.manager.undo()
+        self.assertEqual(
+            [task["text"] for task in self.manager.get_tasks()],
+            ["third", "second", "first"],
+        )
+
+
+class TaskManagerCompletionTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.manager = TaskManager(self.path)
+
+    def tearDown(self):
+        self.manager.close()
+        os.remove(self.path)
+
+    def test_completion_and_reopen_queue_sync(self):
+        task = self.manager.add_task("task")
+        sync_triggers = []
+        self.manager.set_sync_trigger(lambda: sync_triggers.append("sync"))
+
+        completed = self.manager.mark_completed(task["task_id"])
+        self.assertEqual(completed["completed"], 1)
+
+        reopened = self.manager.reopen_task(task["task_id"])
+        self.assertEqual(reopened["completed"], 0)
+
+        payloads = [
+            item["payload"]
+            for item in self.manager.get_pending_sync_items()
+            if item["task_id"] == task["task_id"] and item["payload"] is not None
+        ]
+        self.assertEqual(payloads[-2]["completed"], True)
+        self.assertEqual(payloads[-1]["completed"], False)
+        self.assertEqual(sync_triggers, ["sync", "sync"])
 
 
 if __name__ == "__main__":

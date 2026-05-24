@@ -1,0 +1,5 @@
+django>=5.0,<6.0
+djangorestframework>=3.15,<4.0
+djangorestframework-simplejwt>=5.5,<6.0
+django-unfold>=0.40
+drf-spectacular>=0.27

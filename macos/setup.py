@@ -6,9 +6,9 @@ from setuptools import setup
 
 APP = ['doiter/main.py']
 DATA_FILES = [
-    ('Resources', ['doiter/resources/com.doiter.app.plist',
-                   'doiter/resources/install_autostart.sh',
-                   'doiter/resources/uninstall_autostart.sh'])
+    ('', ['doiter/resources/com.doiter.app.plist',
+          'doiter/resources/install_autostart.sh',
+          'doiter/resources/uninstall_autostart.sh'])
 ]
 OPTIONS = {
     'argv_emulation': False,
@@ -46,10 +46,4 @@ setup(
     app=APP,
     data_files=DATA_FILES,
     options={'py2app': OPTIONS},
-    setup_requires=['py2app'],
-    install_requires=[
-        'pyobjc-core>=10.0',
-        'pyobjc-framework-Cocoa>=10.0',
-        'pyobjc-framework-Quartz>=10.0',
-    ],
 )
