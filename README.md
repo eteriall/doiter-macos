@@ -28,6 +28,22 @@ API docs:
 - Admin: `http://127.0.0.1:8000/admin/`
 - Human API notes: `backend/docs/API.md`
 
+### Docker Compose
+
+Create a `.env` from `.env.example`, set a long random `DOITER_SECRET_KEY`, and set `DOITER_ALLOWED_HOSTS` to the public hostname used by Nginx Proxy Manager. If the public URL is HTTPS, set `DOITER_CSRF_TRUSTED_ORIGINS` to the full origin, for example `https://doiter.example.com`.
+
+```bash
+docker network create proxy
+docker compose up -d --build
+```
+
+Compose stores the backend SQLite database in the named volume `doiter-sqlite`, joins only the external `proxy` network, and does not publish host ports. In Nginx Proxy Manager, proxy to:
+
+```text
+Forward Hostname / IP: doiter-backend
+Forward Port: 8000
+```
+
 ## macOS App
 
 ```bash

@@ -4,11 +4,27 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get("DOITER_SECRET_KEY", "dev-only-adkjhasasjdnaksjdnkjansdkjnas-me")
-DEBUG = True
-ALLOWED_HOSTS = ["127.0.0.1", "localhost", "*"]
+DEV_SECRET_KEY = "dev-only-adkjhasasjdnaksjdnkjansdkjnas-me"
+SECRET_KEY = os.environ.get("DOITER_SECRET_KEY", DEV_SECRET_KEY)
+DEBUG = os.environ.get("DOITER_DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+
+if not DEBUG and SECRET_KEY == DEV_SECRET_KEY:
+    raise ImproperlyConfigured("Set DOITER_SECRET_KEY when DOITER_DEBUG is false.")
+
+
+def env_list(name, default):
+    value = os.environ.get(name)
+    if not value:
+        return default
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+ALLOWED_HOSTS = env_list("DOITER_ALLOWED_HOSTS", ["127.0.0.1", "localhost"])
+CSRF_TRUSTED_ORIGINS = env_list("DOITER_CSRF_TRUSTED_ORIGINS", [])
 
 INSTALLED_APPS = [
     "unfold",
@@ -27,6 +43,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -57,7 +74,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "NAME": os.environ.get("DOITER_DB_PATH", BASE_DIR / "db.sqlite3"),
     }
 }
 
@@ -74,7 +91,27 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = os.environ.get(
+    "DOITER_SESSION_COOKIE_SECURE",
+    str(not DEBUG),
+).lower() in {"1", "true", "yes", "on"}
+CSRF_COOKIE_SECURE = os.environ.get(
+    "DOITER_CSRF_COOKIE_SECURE",
+    str(not DEBUG),
+).lower() in {"1", "true", "yes", "on"}
+SECURE_SSL_REDIRECT = os.environ.get(
+    "DOITER_SECURE_SSL_REDIRECT",
+    "false",
+).lower() in {"1", "true", "yes", "on"}
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
