@@ -67,6 +67,12 @@ class TaskSerializer(serializers.ModelSerializer):
         self._apply_completed_at_transition(validated_data, instance)
         return super().update(instance, validated_data)
 
+    def validate_text(self, value):
+        title = str(value).splitlines()[0].strip() if value is not None else ""
+        if not title:
+            raise serializers.ValidationError("Task title cannot be empty.")
+        return title
+
     def _apply_completed_at_transition(self, validated_data, instance=None):
         if "completed" not in validated_data:
             return

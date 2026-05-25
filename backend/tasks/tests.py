@@ -81,6 +81,20 @@ class TaskAPITests(APITestCase):
         self.assertEqual(response.data["position"], 7)
         self.assertEqual(len(self.client.get("/api/tasks/").data), 1)
 
+    def test_task_text_is_title_only(self):
+        response = self.client.post("/api/tasks/", self.task_payload(text="title\ndescription"), format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["text"], "title")
+
+        response = self.client.patch(
+            "/api/tasks/11111111-1111-1111-1111-111111111111/",
+            {"text": "edited\nignored"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["text"], "edited")
+
     def test_patch_completed_and_reopen_task(self):
         task_id = "11111111-1111-1111-1111-111111111111"
         response = self.client.post("/api/tasks/", self.task_payload(task_id=task_id), format="json")
