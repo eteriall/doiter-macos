@@ -4,6 +4,7 @@ import objc
 from Foundation import NSObject, NSMakeRect
 from AppKit import (
     NSBackingStoreBuffered,
+    NSApp,
     NSButton,
     NSCenterTextAlignment,
     NSColor,
@@ -101,7 +102,10 @@ class AuthWindow:
     def show(self):
         self._authenticated = False
         self.is_visible = True
+        NSApp().activateIgnoringOtherApps_(True)
+        self.window.center()
         self.window.makeKeyAndOrderFront_(None)
+        self.window.becomeKeyWindow()
         self.window.makeFirstResponder_(self.username)
 
     def closed(self):

@@ -3,6 +3,7 @@
 import json
 import platform
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -141,6 +142,7 @@ class DoiterAPIClient:
     def __init__(self, config: ConfigStore, token_store: KeychainTokenStore):
         self.config = config
         self.token_store = token_store
+        self._refresh_lock = threading.Lock()
 
     @property
     def token(self) -> Optional[str]:
@@ -154,14 +156,22 @@ class DoiterAPIClient:
         return get_refresh()
 
     def request(self, method: str, path: str, data: Optional[Dict] = None, auth: bool = True, retry_on_unauthorized: bool = True):
+        access_token = self.token if auth else None
         try:
-            return self._request_once(method, path, data, auth)
+            return self._request_once(method, path, data, auth, access_token)
         except APIError as exc:
-            if auth and retry_on_unauthorized and exc.status == 401 and self._refresh_auth():
+            if auth and retry_on_unauthorized and exc.status == 401 and self._refresh_auth(access_token):
                 return self._request_once(method, path, data, auth)
             raise
 
-    def _request_once(self, method: str, path: str, data: Optional[Dict] = None, auth: bool = True):
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        data: Optional[Dict] = None,
+        auth: bool = True,
+        access_token: Optional[str] = None,
+    ):
         url = f"{self.config.get_api_base_url()}/{path.lstrip('/')}"
         body = None
         headers = {
@@ -174,7 +184,7 @@ class DoiterAPIClient:
             body = json.dumps(data).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if auth:
-            token = self.token
+            token = access_token if access_token is not None else self.token
             if token:
                 headers["Authorization"] = f"Bearer {token}"
 
@@ -191,27 +201,34 @@ class DoiterAPIClient:
         except (urllib.error.URLError, TimeoutError) as exc:
             raise APIError("Server unavailable", url=url) from exc
 
-    def _refresh_auth(self) -> bool:
-        refresh = self.refresh_token
-        if not refresh:
-            return False
-        try:
-            result = self.request(
-                "POST",
-                "auth/refresh/",
-                {"refresh": refresh},
-                auth=False,
-                retry_on_unauthorized=False,
-            )
-        except APIError:
-            self.token_store.clear()
-            return False
-        access = result.get("access")
-        if not access:
-            self.token_store.clear()
-            return False
-        self.token_store.set_tokens(access, result.get("refresh") or refresh)
-        return True
+    def _refresh_auth(self, failed_access_token: Optional[str] = None) -> bool:
+        with self._refresh_lock:
+            if failed_access_token and self.token and self.token != failed_access_token:
+                return True
+
+            refresh = self.refresh_token
+            if not refresh:
+                return False
+            try:
+                result = self.request(
+                    "POST",
+                    "auth/refresh/",
+                    {"refresh": refresh},
+                    auth=False,
+                    retry_on_unauthorized=False,
+                )
+            except APIError as exc:
+                if exc.status in (400, 401, 403) and self.refresh_token == refresh:
+                    self.token_store.clear()
+                    return False
+                raise
+            access = result.get("access")
+            if not access:
+                if self.refresh_token == refresh:
+                    self.token_store.clear()
+                return False
+            self.token_store.set_tokens(access, result.get("refresh") or refresh)
+            return True
 
     def _error_message(self, exc: urllib.error.HTTPError, url: str) -> str:
         body = exc.read().decode("utf-8", errors="replace")

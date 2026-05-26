@@ -4,6 +4,7 @@ import objc
 from Foundation import NSObject, NSMakeRect
 from AppKit import (
     NSBackingStoreBuffered,
+    NSApp,
     NSButton,
     NSCenterTextAlignment,
     NSTextField,
@@ -70,7 +71,10 @@ class SettingsWindow:
     def show(self):
         self.url_field.setStringValue_(self.config_store.get_api_base_url())
         self.status.setStringValue_("")
+        NSApp().activateIgnoringOtherApps_(True)
+        self.window.center()
         self.window.makeKeyAndOrderFront_(None)
+        self.window.becomeKeyWindow()
         self.window.makeFirstResponder_(self.url_field)
 
     def save(self):
