@@ -246,7 +246,7 @@ class Database:
     def get_all_tasks(self, sort_by: str = "position") -> List[Dict]:
         """Get all tasks ordered by position (newest first) or by tags."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM tasks ORDER BY position DESC")
+        cursor.execute("SELECT * FROM tasks ORDER BY position DESC, created_at DESC, task_id ASC")
         tasks = [self._row_to_task(row) for row in cursor.fetchall()]
 
         if sort_by == "tags":
@@ -264,7 +264,7 @@ class Database:
         cursor.execute("""
             SELECT * FROM tasks
             WHERE LOWER(text) LIKE ?
-            ORDER BY position DESC
+            ORDER BY position DESC, created_at DESC, task_id ASC
         """, (like_pattern,))
 
         tasks = [self._row_to_task(row) for row in cursor.fetchall()]
@@ -294,8 +294,15 @@ class Database:
             priorities = [tag_priority.get(tag, 999) for tag in tags]
             return min(priorities)
 
-        # Sort by tag priority (ascending), then by position (descending for newest first)
-        return sorted(tasks, key=lambda t: (get_min_tag_priority(t), -t.get('position', 0)))
+        return sorted(
+            tasks,
+            key=lambda task: (
+                get_min_tag_priority(task),
+                -task.get('position', 0),
+                -task.get('created_at', 0),
+                task.get('task_id', ''),
+            ),
+        )
 
     def _record_undo(self, action: str, task: Dict):
         """Record an action in the undo stack."""
@@ -484,6 +491,28 @@ class Database:
         self._record_undo('reorder', {'before': before, 'after': after})
         self._clear_redo_stack()
 
+    def normalize_positions_if_needed(self) -> Optional[List[Dict]]:
+        """Renumber all tasks to unique contiguous positions while preserving display order."""
+        display_ordered_tasks = self.get_all_tasks()
+        highest_position = len(display_ordered_tasks) - 1
+        expected_positions = {
+            task["task_id"]: highest_position - index
+            for index, task in enumerate(display_ordered_tasks)
+        }
+        if all(task.get("position", 0) == expected_positions[task["task_id"]] for task in display_ordered_tasks):
+            return None
+
+        now = time.time()
+        cursor = self.conn.cursor()
+        for task in display_ordered_tasks:
+            cursor.execute("""
+                UPDATE tasks
+                SET position = ?, updated_at = ?
+                WHERE task_id = ?
+            """, (expected_positions[task["task_id"]], now, task["task_id"]))
+        self.conn.commit()
+        return self.get_all_tasks()
+
     def swap_task_positions(
         self,
         task_id: str,
@@ -515,6 +544,61 @@ class Database:
             after = [self.get_task(task_id), self.get_task(other_task_id)]
             self.record_reorder(before, after)
         return self.get_task(task_id)
+
+    def reorder_visible_tasks(
+        self,
+        reordered_task_ids: List[str],
+        record_undo: bool = True,
+    ) -> Optional[Dict]:
+        """Apply a visible row order and renumber every task position uniquely."""
+        if not reordered_task_ids:
+            return None
+
+        all_tasks = self.get_all_tasks()
+        tasks_by_id = {task["task_id"]: task for task in all_tasks}
+        reordered_ids = [
+            task_id
+            for task_id in reordered_task_ids
+            if task_id in tasks_by_id
+        ]
+        if len(reordered_ids) < 2:
+            return None
+
+        before = all_tasks
+        replacement_tasks = [tasks_by_id[task_id] for task_id in reordered_ids]
+        replacement_id_set = set(reordered_ids)
+        display_ordered_tasks = []
+        replacement_index = 0
+        for task in all_tasks:
+            if task["task_id"] in replacement_id_set:
+                display_ordered_tasks.append(replacement_tasks[replacement_index])
+                replacement_index += 1
+            else:
+                display_ordered_tasks.append(task)
+
+        now = time.time()
+        highest_position = len(display_ordered_tasks) - 1
+        cursor = self.conn.cursor()
+        changed = False
+        for index, task in enumerate(display_ordered_tasks):
+            normalized_position = highest_position - index
+            if task.get("position", 0) == normalized_position:
+                continue
+            changed = True
+            cursor.execute("""
+                UPDATE tasks
+                SET position = ?, updated_at = ?
+                WHERE task_id = ?
+            """, (normalized_position, now, task["task_id"]))
+
+        if not changed:
+            return None
+
+        self.conn.commit()
+        after = self.get_all_tasks()
+        if record_undo:
+            self.record_reorder(before, after)
+        return tasks_by_id[reordered_ids[0]]
 
     def task_payload(self, task: Dict) -> Dict:
         """Return a JSON-ready payload for the backend task API."""

@@ -1699,8 +1699,11 @@ class OverlayWindow:
             return True
 
         task = self.current_tasks[self.selected_index]
-        other = self.current_tasks[target_index]
-        if self.task_manager.swap_task_positions(task['task_id'], other['task_id']):
+        reordered_tasks = list(self.current_tasks)
+        moved_task = reordered_tasks.pop(self.selected_index)
+        reordered_tasks.insert(target_index, moved_task)
+        reordered_task_ids = [task['task_id'] for task in reordered_tasks]
+        if self.task_manager.reorder_visible_tasks(reordered_task_ids):
             moved_task_id = task['task_id']
             self._refresh_tasks()
             self._select_task_by_id(moved_task_id, focus_table=True)

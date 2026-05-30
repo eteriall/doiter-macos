@@ -18,6 +18,7 @@ class TaskManager:
         self._reorder_lock = threading.Lock()
         self._reorder_timer: Optional[threading.Timer] = None
         self._pending_reorder_before: Optional[List[Dict]] = None
+        self._repair_positions_if_needed()
 
     def add_observer(self, callback: Callable):
         """Add an observer that will be notified on task changes."""
@@ -31,6 +32,8 @@ class TaskManager:
     def set_sync_trigger(self, callback: Callable):
         """Set a callback invoked after local mutations should sync."""
         self.sync_trigger = callback
+        if self.db.has_pending_sync() and self.sync_trigger:
+            self.sync_trigger()
 
     def _queue_sync(self, action: str, task: Optional[Dict]):
         if self._applying_remote or not task:
@@ -178,6 +181,22 @@ class TaskManager:
         """Swap two task positions and debounce the reorder commit."""
         before = self.db.get_all_tasks()
         result = self.db.swap_task_positions(task_id, other_task_id, record_undo=False)
+        if result:
+            self._schedule_reorder_commit(before)
+            self.notify_observers()
+        return result
+
+    def _repair_positions_if_needed(self):
+        repaired_tasks = self.db.normalize_positions_if_needed()
+        if not repaired_tasks:
+            return
+        for task in repaired_tasks:
+            self.db.queue_sync("upsert", task)
+
+    def reorder_visible_tasks(self, reordered_task_ids: List[str]) -> Optional[Dict]:
+        """Apply visible task order and debounce the reorder sync/undo commit."""
+        before = self.db.get_all_tasks()
+        result = self.db.reorder_visible_tasks(reordered_task_ids, record_undo=False)
         if result:
             self._schedule_reorder_commit(before)
             self.notify_observers()
