@@ -3,6 +3,7 @@
 from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
+from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework.routers import DefaultRouter
 
@@ -17,6 +18,7 @@ def healthz(request):
 
 
 urlpatterns = [
+    path("", RedirectView.as_view(pattern_name="admin:index", permanent=False), name="home"),
     path("healthz/", healthz, name="healthz"),
     path("admin/", admin.site.urls),
     path("api/auth/", include("accounts.urls")),

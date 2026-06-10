@@ -30,7 +30,7 @@ API docs:
 
 ### Docker Compose
 
-Create a `.env` from `.env.example`, set a long random `DOITER_SECRET_KEY`, and set `DOITER_ALLOWED_HOSTS` to the public hostname used by Nginx Proxy Manager. If the public URL is HTTPS, set `DOITER_CSRF_TRUSTED_ORIGINS` to the full origin, for example `https://doiter.example.com`.
+Create a `.env` from `.env.example`, set a long random `DOITER_SECRET_KEY`, and set `DOITER_ALLOWED_HOSTS` to the public hostname used by Nginx Proxy Manager. For production, the default public hostname is `doiter.rasskazchikov.de` and the CSRF trusted origin is `https://doiter.rasskazchikov.de`.
 
 ```bash
 docker network create proxy

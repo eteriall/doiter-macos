@@ -6,6 +6,14 @@ from rest_framework_simplejwt.tokens import RefreshToken
 User = get_user_model()
 
 
+class URLTests(APITestCase):
+    def test_root_redirects_to_admin(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], reverse("admin:index"))
+
+
 class AuthTests(APITestCase):
     def test_register_login_me_logout(self):
         response = self.client.post("/api/auth/register/", {"username": "alex", "password": "strong-pass-123"}, format="json")
