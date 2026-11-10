@@ -50,3 +50,6 @@ backend/staticfiles/
 
 # Logs
 *.log
+
+# Deployment secrets
+.env
